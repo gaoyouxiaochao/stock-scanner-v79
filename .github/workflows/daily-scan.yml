@@ -2,18 +2,20 @@ name: 每日A股强势股扫描 (北京时间17:00)
 
 on:
   schedule:
-    - cron: '0 9 * * *'      # UTC 9:00 = 北京时间 17:00
-  workflow_dispatch:         # 允许手动点击运行（用于测试）
+    - cron: '0 9 * * 1-5'   # 工作日北京时间 17:00
+  workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   scan:
     runs-on: ubuntu-latest
-
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: 设置 Python 环境
+      - name: 设置 Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -21,14 +23,50 @@ jobs:
       - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
-          pip install pandas numpy akshare baostock tqdm openpyxl
+          pip install pandas numpy akshare baostock tqdm openpyxl requests
 
       - name: 运行强势股扫描器
         run: python stock_scanner_v79.py
 
-      - name: 上传扫描结果（供下载）
-        uses: actions/upload-artifact@v4
-        with:
-          name: daily-scan-results
-          path: results/
-          retention-days: 7
+      - name: 提交结果并推送微信
+        env:
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          mkdir -p results
+          FILE=$(ls -t results/*.xlsx 2>/dev/null | head -n 1 || true)
+
+          if [ -z "$FILE" ]; then
+            echo "没有生成 Excel，跳过推送"
+            exit 0
+          fi
+
+          git add results/
+          if git diff --staged --quiet; then
+            echo "结果无变化，仍推送已有文件链接"
+          else
+            git commit -m "📈 自动更新: A股强势股扫描 $(date '+%Y-%m-%d %H:%M:%S')"
+            git push
+          fi
+
+          FILENAME=$(basename "$FILE")
+          PAGE_URL="https://github.com/${{ github.repository }}/blob/main/results/${FILENAME}"
+          RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/results/${FILENAME}"
+
+          TITLE="📈 A股强势股扫描 $(date '+%Y-%m-%d')"
+          CONTENT="扫描完成。
+
+【在线查看/下载】
+${PAGE_URL}
+
+【直接下载 Excel】
+${RAW_URL}
+
+文件：${FILENAME}
+（非交易日数据仅供参考）"
+
+          curl -s -X POST "http://www.pushplus.plus/send" \
+            -H "Content-Type: application/json" \
+            -d "{\"token\":\"${PUSHPLUS_TOKEN}\",\"title\":\"${TITLE}\",\"content\":\"${CONTENT}\",\"template\":\"txt\"}"
