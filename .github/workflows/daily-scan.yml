@@ -1,8 +1,8 @@
-name: Daily A-share scan
+name: 每日A股强势股扫描 (北京时间17:00)
 
 on:
   schedule:
-    - cron: '0 9 * * 1-5'
+    - cron: '0 9 * * 1-5'   # UTC 09:00 = 北京时间 17:00，周一到周五
   workflow_dispatch:
 
 permissions:
@@ -12,44 +12,61 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: 检出代码
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: 设置 Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: Install deps
+      - name: 安装依赖
         run: |
           python -m pip install --upgrade pip
           pip install pandas numpy akshare baostock tqdm openpyxl requests
 
-      - name: Run scanner
+      - name: 运行强势股扫描器
         run: python stock_scanner_v79.py
 
-      - name: Commit and PushPlus
+      - name: 提交结果并微信推送 Download 链接
         env:
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
         run: |
+          set -e
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           mkdir -p results
+
           FILE=$(ls -t results/*.xlsx 2>/dev/null | head -n 1 || true)
           if [ -z "$FILE" ]; then
-            echo "No xlsx found, skip push"
+            echo "没有生成 Excel，跳过推送"
             exit 0
           fi
-          git add -f results/
+
+          # results 可能被 gitignore，强制加入
+          git add -f results/*.xlsx || git add -f "$FILE" || true
           if ! git diff --staged --quiet; then
-            git commit -m "auto stock scan"
+            git commit -m "auto stock scan $(date '+%Y-%m-%d %H:%M')"
             git push
+          else
+            echo "无新文件变更，仍尝试推送下载链接"
           fi
+
           FILENAME=$(basename "$FILE")
-          PAGE_URL="https://github.com/${{ github.repository }}/blob/main/results/${FILENAME}"
-          RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/results/${FILENAME}"
-          TITLE="A-share scan result"
-          CONTENT="Scan finished. View: ${PAGE_URL} Download: ${RAW_URL} File: ${FILENAME}"
+          # 中文文件名 URL 编码，避免 raw 链接 404
+          ENC_NAME=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$FILENAME")
+          RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/results/${ENC_NAME}"
+
+          echo "Download URL: $RAW_URL"
+
+          if [ -z "${PUSHPLUS_TOKEN}" ]; then
+            echo "未配置 PUSHPLUS_TOKEN，跳过微信推送"
+            exit 0
+          fi
+
+          # 微信只推一条 Download 直链
           curl -s -X POST "http://www.pushplus.plus/send" \
             -H "Content-Type: application/json" \
-            -d "{\"token\":\"${PUSHPLUS_TOKEN}\",\"title\":\"${TITLE}\",\"content\":\"${CONTENT}\",\"template\":\"txt\"}"
+            -d "{\"token\":\"${PUSHPLUS_TOKEN}\",\"title\":\"A股扫描结果\",\"content\":\"${RAW_URL}\",\"template\":\"txt\"}"
+
+          echo "PushPlus 已发送"
