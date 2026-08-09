@@ -1,6 +1,9 @@
 # -*- coding: utf-8 -*-
 """ 【A股强势股扫描器 v7.9_MultiSource_Final_Stable】
 - 最终干净版：无任何append调用 + Lock保护 + 强重试
+- 扩展实时字段 + 连涨/3日指标
+- 修复：涨幅相对昨收、20日突破排除当日、交易日回退、异常捕获
+- 修复：RS除零、连续涨停计数、shift首行NaN、OBV窗口、止损语义
 - 32只/424只均可稳定运行 """
 
 import pandas as pd
@@ -100,11 +103,10 @@ def fetch_with_baostock(code: str, start_date: str, end_date: str):
                         frequency="d",
                         adjustflag=adjust
                     )
-                if rs.error_code != '0':
-                    continue
-
-                df = rs.get_data()
-                if df.empty or len(df) < MIN_HIST_DAYS:
+                    if rs.error_code != '0':
+                        continue
+                    df = rs.get_data()
+                if df is None or df.empty or len(df) < MIN_HIST_DAYS:
                     continue
 
                 print(f"   ✅ 第{attempt+1}次成功 获取 {len(df)} 条数据")
@@ -135,7 +137,7 @@ def fetch_hist_with_fallback(code: str, end_date_str: str):
                                         '最低':'low','收盘':'close','成交量':'volume'})
                 return df
             time.sleep(0.5)
-        except:
+        except Exception:
             time.sleep(0.8 + random.uniform(0, 0.3))
 
     print(f"  └─ {code} akshare 失败，切换 Baostock...")
@@ -146,6 +148,12 @@ def fetch_hist_with_fallback(code: str, end_date_str: str):
 
 # ================== 基础工具 ==================
 def get_last_trade_day():
+    """尽量回退到最近工作日（简单处理周末；节假日仍依赖数据源返回）"""
+    d = datetime.now()
+    for _ in range(10):
+        if d.weekday() < 5:  # Mon-Fri
+            return d.strftime("%Y-%m-%d")
+        d -= timedelta(days=1)
     return datetime.now().strftime("%Y-%m-%d")
 
 def is_beijing_stock(code):
@@ -205,7 +213,7 @@ def fetch_hs300_data(end_date_str):
         if not df.empty:
             df = df.rename(columns={'日期': 'date', '开盘': 'open', '最高': 'high', '最低': 'low', '收盘': 'close', '成交量': 'volume'})
             return clean_numeric(df)
-    except:
+    except Exception:
         pass
     try:
         start_date = (datetime.now() - timedelta(days=400)).strftime("%Y%m%d")
@@ -214,7 +222,7 @@ def fetch_hs300_data(end_date_str):
         if not df.empty:
             df = df.rename(columns={'日期': 'date', '开盘': 'open', '最高': 'high', '最低': 'low', '收盘': 'close', '成交量': 'volume'})
             return clean_numeric(df)
-    except:
+    except Exception:
         pass
     return None
 
@@ -225,7 +233,7 @@ def fetch_hist_with_cache(code, end_date_str):
             with open(cache_file, 'rb') as f:
                 df = pickle.load(f)
             return clean_numeric(df), None
-        except:
+        except Exception:
             pass
     df = fetch_hist_with_fallback(code, end_date_str)
     if df is not None and len(df) >= MIN_HIST_DAYS:
@@ -233,7 +241,7 @@ def fetch_hist_with_cache(code, end_date_str):
         try:
             with open(cache_file, 'wb') as f:
                 pickle.dump(df, f)
-        except:
+        except Exception:
             pass
         return df, None
     return None, '数据获取失败（AkShare+Baostock均失败）'
@@ -267,27 +275,141 @@ def get_all_spot_data():
         if not spot_cache.empty:
             spot_cache.columns = [str(c).lower().strip() for c in spot_cache.columns]
         return spot_cache
-    except:
+    except Exception:
         return pd.DataFrame()
 
-def fetch_today_quote(code, spot_df):
-    symbol = get_akshare_symbol(code)
-    if spot_df.empty:
-        return {'今日涨跌幅': 0, '今日开盘价': 0, '今日收盘价': 0, '今日成交量': 0}
-    code_col = '代码' if '代码' in spot_df.columns else 'code'
-    row = spot_df[spot_df[code_col].astype(str).str.strip() == symbol]
-    if not row.empty:
-        open_col = next((c for c in ['今开', '开盘'] if c in row.columns), None)
-        close_col = next((c for c in ['最新价', '收盘'] if c in row.columns), None)
-        pct_col = next((c for c in ['涨跌幅', 'pct'] if c in row.columns), None)
-        vol_col = next((c for c in ['成交量', 'volume', '成交手'] if c in row.columns), None)
-        open_price = float(row[open_col].iloc[0]) if open_col else 0
-        close_price = float(row[close_col].iloc[0]) if close_col else 0
-        pct = float(row[pct_col].iloc[0]) if pct_col else 0
-        volume = float(row[vol_col].iloc[0]) if vol_col else 0
-        return {'今日涨跌幅': round(pct, 2), '今日开盘价': round(open_price, 2),
-                '今日收盘价': round(close_price, 2), '今日成交量': int(volume)}
-    return {'今日涨跌幅': 0, '今日开盘价': 0, '今日收盘价': 0, '今日成交量': 0}
+
+def build_spot_lookup(spot_df):
+    """一次性构建 code -> Series 索引，避免每只股票反复筛选全表"""
+    if spot_df is None or getattr(spot_df, 'empty', True):
+        return {}
+    df = spot_df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    code_col = next((c for c in df.columns if c in ('代码', 'code')), None)
+    if code_col is None:
+        return {}
+    lookup = {}
+    for _, r in df.iterrows():
+        key = re.sub(r'\D', '', str(r[code_col])).zfill(6)
+        if key:
+            lookup[key] = r
+    return lookup
+
+
+def fetch_today_quote(code, spot_df, spot_lookup=None):
+    """从东财实时行情提取更多字段；缺失字段填 0。"""
+    empty = {
+        '今日涨跌幅': 0.0, '今日开盘价': 0.0, '今日收盘价': 0.0, '今日成交量': 0,
+        '昨收': 0.0, '今开': 0.0, '今日最高': 0.0, '今日最低': 0.0,
+        '今日振幅': 0.0, '量比': 0.0, '成交额': 0.0, '换手率': 0.0, '今日均价': 0.0,
+        '内盘': 0.0, '外盘': 0.0, '委比': 0.0,
+    }
+    symbol = get_akshare_symbol(code).zfill(6)
+    r = None
+    if spot_lookup is not None:
+        r = spot_lookup.get(symbol)
+    elif spot_df is not None and not getattr(spot_df, 'empty', True):
+        df = spot_df
+        df_cols = [str(c).strip() for c in df.columns]
+        # 不整体 copy，只做列名映射
+        colmap = {str(c).strip(): c for c in df.columns}
+        code_col = colmap.get('代码') or colmap.get('code')
+        if code_col is not None:
+            s = df[code_col].astype(str).str.replace(r'\D', '', regex=True).str.zfill(6)
+            hit = df[s == symbol]
+            if not hit.empty:
+                r = hit.iloc[0]
+    if r is None:
+        return empty
+
+    def g(*names, default=0.0):
+        for n in names:
+            if n in r.index and pd.notna(r[n]):
+                try:
+                    return float(r[n])
+                except Exception:
+                    continue
+        return default
+
+    open_p = g('今开', '开盘')
+    high_p = g('最高')
+    low_p = g('最低')
+    close_p = g('最新价', '收盘')
+    pre_close = g('昨收')
+    pct = g('涨跌幅', 'pct')
+    vol = g('成交量', 'volume', '成交手')
+    amount = g('成交额', 'amount')
+    amp = g('振幅')
+    if amp == 0 and pre_close > EPSILON:
+        amp = (high_p - low_p) / pre_close * 100
+    vol_ratio = g('量比')
+    turnover = g('换手率', '换手')
+
+    avg_price = 0.0
+    if amount > 0 and vol > 0:
+        avg_price = amount / (vol * 100 + EPSILON)
+        if avg_price < 0.05 or (close_p > 0 and (avg_price > close_p * 5 or avg_price < close_p * 0.2)):
+            avg_price = (high_p + low_p + close_p) / 3 if close_p > 0 else close_p
+    elif close_p > 0:
+        avg_price = (high_p + low_p + close_p) / 3
+
+    return {
+        '今日涨跌幅': round(pct, 2),
+        '今日开盘价': round(open_p, 2),
+        '今日收盘价': round(close_p, 2),
+        '今日成交量': int(vol),
+        '昨收': round(pre_close, 2),
+        '今开': round(open_p, 2),
+        '今日最高': round(high_p, 2),
+        '今日最低': round(low_p, 2),
+        '今日振幅': round(amp, 2),
+        '量比': round(vol_ratio, 2),
+        '成交额': round(amount, 2),
+        '换手率': round(turnover, 2),
+        '今日均价': round(avg_price, 2),
+        '内盘': round(g('内盘'), 2),
+        '外盘': round(g('外盘'), 2),
+        '委比': round(g('委比'), 2),
+    }
+
+
+def calc_streak_and_3d(hist):
+    """连涨天、3日涨%、连续3天振幅%、连续3天均价"""
+    out = {
+        '连涨天': 0,
+        '3日涨%': 0.0,
+        '连续3天振幅%': 0.0,
+        '连续3天均价': 0.0,
+    }
+    if hist is None or len(hist) < 4:
+        return out
+    h = hist.sort_values('date').reset_index(drop=True)
+    closes = h['close'].astype(float).values
+    streak = 0
+    for i in range(len(closes) - 1, 0, -1):
+        if closes[i] > closes[i - 1]:
+            streak += 1
+        else:
+            break
+    out['连涨天'] = int(streak)
+
+    last3 = h.tail(3)
+    if len(last3) == 3:
+        c0 = float(last3['close'].iloc[0])
+        c2 = float(last3['close'].iloc[-1])
+        out['3日涨%'] = round((c2 / (c0 + EPSILON) - 1) * 100, 2)
+        amps = []
+        start_i = len(h) - 3
+        for i in range(start_i, len(h)):
+            prev_c = float(h['close'].iloc[i - 1])
+            hi = float(h['high'].iloc[i])
+            lo = float(h['low'].iloc[i])
+            if prev_c > EPSILON:
+                amps.append((hi - lo) / prev_c * 100)
+        out['连续3天振幅%'] = round(float(np.mean(amps)), 2) if amps else 0.0
+        out['连续3天均价'] = round(float(last3['close'].mean()), 2)
+    return out
+
 
 # ================== 技术指标（干净无append）==================
 def precompute_indicators(hist):
@@ -301,7 +423,7 @@ def calculate_adx(hist, period=14):
     if len(hist) < period * 2 + 1:
         return 0.0
     high, low, close = hist['high'], hist['low'], hist['close']
-    tr = pd.concat([high - low, abs(high - close.shift()), abs(low - close.shift())], axis=1).max(axis=1)
+    tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
     plus_dm = high.diff().where((high.diff() > -low.diff()) & (high.diff() > 0), 0)
     minus_dm = (-low.diff()).where((-low.diff() > high.diff()) & (-low.diff() > 0), 0)
     atr = tr.ewm(alpha=1 / period, adjust=False).mean()
@@ -318,7 +440,7 @@ def detect_technical_patterns(hist):
     patterns = []
     if hist['ma5'].iloc[-1] > hist['ma10'].iloc[-1] and hist['ma5'].iloc[-2] <= hist['ma10'].iloc[-2]:
         patterns.append("MA5 金叉 MA10")
-    if hist['close'].iloc[-1] > hist['high'].tail(20).max() * 1.02:
+    if len(hist) >= 21 and hist['close'].iloc[-1] > hist['high'].iloc[-21:-1].max() * 1.02:
         patterns.append("突破 20 日高点")
     vol_ma5 = hist['volume'].rolling(5).mean()
     if hist['volume'].iloc[-1] > vol_ma5.iloc[-1] * 2 and hist['close'].iloc[-1] > hist['close'].iloc[-2] * 1.015:
@@ -439,35 +561,37 @@ def calculate_support_resistance(hist):
             round(hist['low'].tail(5).min(), 2), round(hist['high'].tail(5).max(), 2))
 
 def check_valid_breakout(hist, code=""):
-    if len(hist) < 10:
+    if len(hist) < 12:
         return 0
     market_type = detect_market_type(code)
     min_pct = MARKET_CONFIG[market_type]['breakout_pct']
-    df = hist.tail(60).copy()
+    df = hist.tail(61).copy()
     df['range'] = df['high'] - df['low']
     df['range'] = df['range'].replace(0, np.nan).fillna(EPSILON)
     df['close_pos'] = (df['close'] - df['low']) / df['range']
     df['vol_ma5'] = df['volume'].rolling(5).mean()
-    df['pct'] = (df['close'] / df['open'] - 1) * 100
+    df['pct'] = (df['close'] / df['close'].shift(1) - 1) * 100
+    df = df.iloc[1:]  # 去掉 shift 首行 NaN
     valid = (df['pct'] >= min_pct) & (df['close_pos'] >= 0.85) & (df['volume'] > df['vol_ma5'] * 1.5)
     return int(valid.sum())
 
 def calculate_chip_efficiency(hist, code=""):
-    if len(hist) < 20:
+    if len(hist) < 21:
         return 0.0
     market_type = detect_market_type(code)
     limit_pct = MARKET_CONFIG[market_type]['limit_pct']
-    df = hist.tail(20).copy()
+    df = hist.tail(21).copy()
     df['is_up'] = df['close'] >= df['open']
-    df['is_limit'] = (df['close'] / df['open'] - 1) >= limit_pct
+    df['is_limit'] = (df['close'] / df['close'].shift(1) - 1) >= limit_pct
+    df = df.iloc[1:]  # 去掉 shift 产生的首行 NaN
     max_consec = 0
     current = 0
-    for is_limit, is_up in zip(df['is_limit'], df['is_up']):
-        if is_limit:
+    for is_limit in df['is_limit']:
+        if bool(is_limit):
             current += 1
             max_consec = max(max_consec, current)
-        elif not is_up:
-            current = 0
+        else:
+            current = 0  # 非涨停即断开连续
     if max_consec >= 3:
         return 15.0
     up_vol = df[df['is_up']]['volume'].sum()
@@ -484,11 +608,13 @@ def calculate_obv_trend(hist):
     close_change = hist['close'].diff().fillna(0)
     obv_change = np.where(close_change > 0, hist['volume'], np.where(close_change < 0, -hist['volume'], 0))
     obv = np.cumsum(obv_change)
+    if len(obv) < 20:
+        return '震荡'
     obv_5 = np.mean(obv[-5:])
-    obv_15 = np.mean(obv[-15:])
-    if obv_5 > obv_15 * 1.01:
+    obv_prev = np.mean(obv[-20:-5])  # 不与近5日重叠的前15日
+    if obv_5 > obv_prev * 1.01:
         return '上升'
-    elif obv_5 < obv_15 * 0.99:
+    elif obv_5 < obv_prev * 0.99:
         return '下降'
     return '震荡'
 
@@ -523,9 +649,13 @@ def get_risk_control(hist, code=""):
     atr_mult = config['atr_mult_high'] if daily_vol > 0.05 else config['atr_mult_mid'] if daily_vol > 0.03 else config['atr_mult_low']
     raw_stop = close - atr_mult * atr
     low_protection = low_20 * 0.95
+    # 取更严格（更靠近现价）的止损候选
     stop_loss = min(raw_stop, low_protection)
+    # 最大允许回撤：止损价不得低于 close*(1-max_drop)（防止止损过远）
     stop_loss = max(stop_loss, close * (1 - config['max_drop']))
-    stop_loss = min(stop_loss, close * 0.95)
+    # 最小止损距离约 2%：避免 ATR 过小导致几乎无保护空间被噪声扫损
+    # （不再用 0.95 强制至少亏 5%，避免与 max_drop 语义混淆）
+    stop_loss = min(stop_loss, close * 0.98)
     return round(max(stop_loss, 0), 2)
 
 def calculate_relative_strength(hist, hs300_df):
@@ -536,8 +666,16 @@ def calculate_relative_strength(hist, hs300_df):
     hs300_aligned = hs300_df[hs300_df['date'].isin(hist_dates)]
     if len(hs300_aligned) < 48:
         return 0.0, 0
-    stock_ret = hist_recent['close'].iloc[-1] / hist_recent['close'].iloc[0]
-    index_ret = hs300_aligned['close'].iloc[-1] / hs300_aligned['close'].iloc[0]
+    s0 = float(hist_recent['close'].iloc[0])
+    s1 = float(hist_recent['close'].iloc[-1])
+    i0 = float(hs300_aligned['close'].iloc[0])
+    i1 = float(hs300_aligned['close'].iloc[-1])
+    if s0 <= EPSILON or i0 <= EPSILON:
+        return 0.0, 0
+    stock_ret = s1 / s0
+    index_ret = i1 / i0
+    if abs(index_ret) < EPSILON:
+        return 0.0, 0
     rs = stock_ret / index_ret
     score = 15 if rs > 1.2 else 10 if rs > 1.1 else 5 if rs > 1.0 else 0 if rs > 0.9 else -5
     return round(rs, 3), score
@@ -554,7 +692,7 @@ def calculate_risk_score(row):
     stop = row['ATR 止损位']
     if price <= EPSILON or stop <= EPSILON:
         return 0
-    risk_ratio = (price - stop) / price
+    risk_ratio = max((price - stop) / price, 0.0)
     if 0.05 <= risk_ratio <= 0.10:
         return 15
     elif 0.03 <= risk_ratio < 0.05:
@@ -591,7 +729,10 @@ def calculate_smart_scores(row):
         r, a = "C 级 (弱势)", "观望 (<10%)"
     else:
         r, a = "D 级 (风险)", "排除/止损"
-    return pd.Series([s1, s2, s3, s4, s5, s6, s7, liquidity_penalty, total, r, a])
+    return pd.Series(
+        [s1, s2, s3, s4, s5, s6, s7, liquidity_penalty, total, r, a],
+        index=['启动得分', '筹码得分', '趋势得分', '共振得分', '资金得分', '风控得分', 'RS 得分', '流动性扣分', '总分', '评级', '操作建议']
+    )
 
 def get_definition_sheet():
     data = {
@@ -610,6 +751,7 @@ if __name__ == "__main__":
     print(f"📅 扫描基准日期：{END_DATE_STR}")
     hs300 = fetch_hs300_data(END_DATE_STR)
     spot_df = get_all_spot_data()
+    spot_lookup = build_spot_lookup(spot_df)
     input_path = None
     for p in POSSIBLE_INPUTS:
         if p.exists():
@@ -636,7 +778,7 @@ if __name__ == "__main__":
     name_dict = dict(zip(input_df['股票代码'], input_df['股票名称']))
     print(f"📊 共加载 {len(MY_STOCKS)} 只股票，开始扫描...\n")
     hist_dict, fetch_errors = batch_fetch_all_hist(MY_STOCKS, END_DATE_STR)
-    errors = fetch_errors
+    errors = list(fetch_errors)
     if not hist_dict:
         print("❌ 无有效数据")
         sys.exit(0)
@@ -651,7 +793,8 @@ if __name__ == "__main__":
             continue
         try:
             df_pre = precompute_indicators(hist)
-            today = fetch_today_quote(code, spot_df)
+            today = fetch_today_quote(code, spot_df, spot_lookup)
+            streak3 = calc_streak_and_3d(hist)
             avg_cost = calculate_vwap_cost(hist)
             profit_pct = calculate_profit_pct(today['今日收盘价'], avg_cost)
             short_sup, short_res, ultra_sup, ultra_res = calculate_support_resistance(hist)
@@ -665,8 +808,17 @@ if __name__ == "__main__":
             stop_distance_pct = round((last_close - stop_loss) / (last_close + EPSILON) * 100, 2) if stop_loss > 0 else 0
             row = {
                 '股票代码': code, '股票名称': name, '最新价': round(last_close, 2),
-                '今日涨跌幅%': today['今日涨跌幅'], '今日开盘价': today['今日开盘价'],
-                '今日收盘价': today['今日收盘价'], '平均成本': avg_cost, '收盘获利%': profit_pct,
+                '昨收': today['昨收'], '今开': today['今开'],
+                '今日最高': today['今日最高'], '今日最低': today['今日最低'],
+                '今日均价': today['今日均价'],
+                '今日涨跌幅%': today['今日涨跌幅'], '今日振幅': today['今日振幅'],
+                '量比': today['量比'], '成交额': today['成交额'],
+                '换手率%': today['换手率'], '今日成交量': today['今日成交量'],
+                '内盘': today['内盘'], '外盘': today['外盘'], '委比': today['委比'],
+                '连涨天': streak3['连涨天'], '3日涨%': streak3['3日涨%'],
+                '连续3天振幅%': streak3['连续3天振幅%'], '连续3天均价': streak3['连续3天均价'],
+                '今日开盘价': today['今日开盘价'], '今日收盘价': today['今日收盘价'],
+                '平均成本': avg_cost, '收盘获利%': profit_pct,
                 '短线支撑位': short_sup, '短线压力位': short_res,
                 '超短线支撑位': ultra_sup, '超短线压力位': ultra_res,
                 'MACD 金叉': macd_cross, '技术形态': tech_patterns, 'K 线形态': kline_patterns,
