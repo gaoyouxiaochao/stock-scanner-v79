@@ -2,7 +2,7 @@ name: 每日A股强势股扫描 (北京时间17:00)
 
 on:
   schedule:
-    - cron: '0 9 * * 1-5'   # 工作日北京时间 17:00
+    - cron: '0 9 * * 1-5'
   workflow_dispatch:
 
 permissions:
@@ -47,7 +47,7 @@ jobs:
           if git diff --staged --quiet; then
             echo "结果无变化，仍推送已有文件链接"
           else
-            git commit -m "📈 自动更新: A股强势股扫描 $(date '+%Y-%m-%d %H:%M:%S')"
+            git commit -m "auto: stock scan $(date '+%Y-%m-%d %H:%M:%S')"
             git push
           fi
 
@@ -55,17 +55,16 @@ jobs:
           PAGE_URL="https://github.com/${{ github.repository }}/blob/main/results/${FILENAME}"
           RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/results/${FILENAME}"
 
-          TITLE="📈 A股强势股扫描 $(date '+%Y-%m-%d')"
-          CONTENT="扫描完成。
+          TITLE="A-share scan $(date '+%Y-%m-%d')"
+          CONTENT="Scan done.
 
-【在线查看/下载】
+View/Download:
 ${PAGE_URL}
 
-【直接下载 Excel】
+Direct Excel:
 ${RAW_URL}
 
-文件：${FILENAME}
-（非交易日数据仅供参考）"
+File: ${FILENAME}"
 
           curl -s -X POST "http://www.pushplus.plus/send" \
             -H "Content-Type: application/json" \
