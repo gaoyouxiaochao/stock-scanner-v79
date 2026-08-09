@@ -37,15 +37,15 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          # 找到最新生成的 Excel（脚本输出中文名时间戳文件）
-          FILE=$(ls -t results/*.xlsx 2>/dev/null | head -n 1 || true)
+          # 找到最新生成的 Excel（脚本输出中文名时间戳文件），排除已有的 latest.xlsx
+          FILE=$(ls -t results/*.xlsx 2>/dev/null | grep -v 'latest.xlsx' | head -n 1 || true)
           if [ -z "$FILE" ] || [ ! -f "$FILE" ]; then
             echo "没有生成 Excel，跳过推送"
             exit 0
           fi
 
           # 复制为固定英文文件名 latest.xlsx
-          cp "$FILE" results/latest.xlsx
+          cp -f "$FILE" results/latest.xlsx
           echo "原始文件: $FILE -> latest.xlsx"
 
           # 提交到仓库（只提交 latest.xlsx，不堆积历史文件）
