@@ -231,13 +231,142 @@ def clean_numeric(df):
     return df
 
 def calc_stock_mas(hist):
-    out = {'MA5': 0.0, 'MA7': 0.0, 'MA10': 0.0, 'MA60': 0.0, 'MA120': 0.0}
+    out = {'MA5': 0.0, 'MA7': 0.0, 'MA10': 0.0, 'MA20': 0.0, 'MA60': 0.0, 'MA120': 0.0}
     if hist is None or len(hist) < 5:
         return out
     c = hist['close']
-    for n, key in [(5, 'MA5'), (7, 'MA7'), (10, 'MA10'), (60, 'MA60'), (120, 'MA120')]:
+    for n, key in [(5, 'MA5'), (7, 'MA7'), (10, 'MA10'), (20, 'MA20'), (60, 'MA60'), (120, 'MA120')]:
         if len(c) >= n:
             out[key] = round(float(c.tail(n).mean()), 3)
+    return out
+
+
+def classify_adx_state(adx):
+    """ADX 趋势强度 → 市场状态（经典阈值）"""
+    try:
+        v = float(adx)
+    except Exception:
+        return '未知'
+    if v < 20:
+        return '无趋势'
+    if v < 25:
+        return '趋势形成中'
+    if v < 40:
+        return '强趋势'
+    if v <= 50:
+        return '极强趋势'
+    return '超强趋势'
+
+
+def classify_stop_distance_state(dist_pct):
+    """止损距离% → 市场状态（风控舒适度）"""
+    try:
+        v = float(dist_pct)
+    except Exception:
+        return '未知'
+    if v < 3:
+        return '极低波动盘整'
+    if v < 5:
+        return '低波动平稳期'
+    if v <= 10:
+        return '健康趋势行情'
+    if v <= 15:
+        return '波动加大/震荡期'
+    return '剧烈波动/深回撤中'
+
+
+def calc_bias_bundle(hist, close_price):
+    """
+    多周期乖离率 + 市场状态
+    BIAS(N)=(收盘-MA(N))/MA(N)*100
+    阈值参考：BIAS5/10/20/60 对照表
+    """
+    out = {
+        'BIAS5%': 0.0, 'BIAS5状态': '未知',
+        'BIAS10%': 0.0, 'BIAS10状态': '未知',
+        'BIAS20%': 0.0, 'BIAS20状态': '未知',
+        'BIAS60%': 0.0, 'BIAS60状态': '未知',
+    }
+    if hist is None or close_price is None or close_price <= EPSILON:
+        return out
+    c = hist['close']
+
+    def bias_n(n):
+        if len(c) < n:
+            return None
+        ma = float(c.tail(n).mean())
+        if ma <= EPSILON:
+            return None
+        return (float(close_price) / ma - 1.0) * 100.0
+
+    def state5(b):
+        if b is None:
+            return '未知'
+        if b < -5:
+            return '极度超卖'
+        if b < -3:
+            return '超卖偏弱'
+        if b <= 3:
+            return '中性区间'
+        if b <= 5:
+            return '超买偏强'
+        return '极度超买'
+
+    def state10(b):
+        if b is None:
+            return '未知'
+        if b < -8:
+            return '极度超卖'
+        if b < -5:
+            return '超卖偏弱'
+        if b <= 5:
+            return '中性区间'
+        if b <= 8:
+            return '超买偏强'
+        return '极度超买'
+
+    def state20(b):
+        if b is None:
+            return '未知'
+        if b < -12:
+            return '极度超卖'
+        if b < -8:
+            return '超卖偏弱'
+        if b <= 5:
+            return '中性区间'
+        if b <= 12:
+            return '超买偏强'
+        return '极度超买'
+
+    def state60(b):
+        if b is None:
+            return '未知'
+        if b < -20:
+            return '极度超卖'
+        if b < -15:
+            return '超卖偏弱'
+        if b <= 15:
+            return '中性区间'
+        if b <= 20:
+            return '超买偏强'
+        return '极度超买'
+
+    b5 = bias_n(5)
+    b10 = bias_n(10)
+    b20 = bias_n(20)
+    b60 = bias_n(60)
+    if b5 is not None:
+        out['BIAS5%'] = round(b5, 2)
+        out['BIAS5状态'] = state5(b5)
+    if b10 is not None:
+        out['BIAS10%'] = round(b10, 2)
+        out['BIAS10状态'] = state10(b10)
+    if b20 is not None:
+        out['BIAS20%'] = round(b20, 2)
+        out['BIAS20状态'] = state20(b20)
+    if b60 is not None:
+        out['BIAS60%'] = round(b60, 2)
+        out['BIAS60状态'] = state60(b60)
     return out
 
 def _normalize_index_df(df):
@@ -986,6 +1115,7 @@ def calculate_chip_efficiency(hist, code=""):
     return round(min(score, 15.0), 2)
 
 def calculate_obv_trend(hist):
+    """OBV 趋势：5日均值 vs 前15日均值。用相对变化率，避免 OBV 为负时乘法阈值反转。"""
     if len(hist) < 20:
         return '震荡'
     close_change = hist['close'].diff().fillna(0)
@@ -993,11 +1123,13 @@ def calculate_obv_trend(hist):
     obv = np.cumsum(obv_change)
     if len(obv) < 20:
         return '震荡'
-    obv_5 = np.mean(obv[-5:])
-    obv_prev = np.mean(obv[-20:-5])
-    if obv_5 > obv_prev * 1.01:
+    obv_5 = float(np.mean(obv[-5:]))
+    obv_prev = float(np.mean(obv[-20:-5]))  # 不重叠窗口
+    # 差值法：正负 OBV 阈值方向一致（±1% 为震荡带）
+    diff_pct = (obv_5 - obv_prev) / (abs(obv_prev) + EPSILON)
+    if diff_pct > 0.01:
         return '上升'
-    elif obv_5 < obv_prev * 0.99:
+    if diff_pct < -0.01:
         return '下降'
     return '震荡'
 
@@ -1023,7 +1155,8 @@ def get_risk_control(hist, code=""):
     h_c = abs(hist['high'] - hist['close'].shift())
     l_c = abs(hist['low'] - hist['close'].shift())
     tr = pd.concat([h_l, h_c, l_c], axis=1).max(axis=1)
-    atr = tr.rolling(14).mean().iloc[-1]
+    # 与 calculate_adx 统一：Wilder SMMA（ewm alpha=1/14），非 SMA
+    atr = float(tr.ewm(alpha=1 / 14, adjust=False).mean().iloc[-1])
     close = hist['close'].iloc[-1]
     if close < EPSILON:
         return 0.0
@@ -1372,6 +1505,10 @@ if __name__ == "__main__":
             limit_up_tag, _ = detect_intraday_limit_up(hist, code, name)
             profit_pct = calculate_profit_pct(current_price, avg_cost)
             stock_mas = calc_stock_mas(hist)
+            adx_val = calculate_adx(hist)
+            adx_state = classify_adx_state(adx_val)
+            stop_state = classify_stop_distance_state(stop_distance_pct)
+            bias_bundle = calc_bias_bundle(hist, current_price)
             short_sup, short_res, ultra_sup, ultra_res = calculate_support_resistance(hist)
             macd_cross = check_macd_golden_cross(hist)
             tech_patterns = detect_technical_patterns(df_pre)
@@ -1441,16 +1578,17 @@ if __name__ == "__main__":
                 'MACD 金叉': macd_cross, '技术形态': tech_patterns, 'K 线形态': kline_patterns,
                 '大阳次数': check_valid_breakout(hist, code),
                 '筹码效率分': calculate_chip_efficiency(hist, code),
-                'ADX 趋势强度': calculate_adx(hist),
+                'ADX 趋势强度': adx_val,
+                'ADX市场状态': adx_state,
                 '均线多头': '是' if check_ma_structure(hist) else '否',
                 'ATR 止损位': stop_loss, '止损距离%': stop_distance_pct,
+                '止损距离状态': stop_state,
                 'OBV 趋势': calculate_obv_trend(hist), '相对强度 RS': rs_value,
                 'RS 得分': rs_score, '20 日均换手率%': avg_turnover,
                 '流动性扣分': liquidity_penalty, '市场类型': detect_market_type(code),
                 '基准指数': BENCHMARK_NAME,
                 'RSI(14)': rsi_val,
                 'KDJ_K': k_val, 'KDJ_D': d_val, 'KDJ_J': j_val,
-                'BIAS20%': bias20,
                 '60日最大回撤%': max_dd,
                 '20日年化波动%': vol_ann,
                 '信号_20日突破放量': sig_break,
@@ -1459,7 +1597,11 @@ if __name__ == "__main__":
                 '策略命中': strategy_tag,
                 '风险标签': risk_tag,
                 'MA5': stock_mas['MA5'], 'MA7': stock_mas['MA7'], 'MA10': stock_mas['MA10'],
-                'MA60': stock_mas['MA60'], 'MA120': stock_mas['MA120'],
+                'MA20': stock_mas['MA20'], 'MA60': stock_mas['MA60'], 'MA120': stock_mas['MA120'],
+                'BIAS5%': bias_bundle['BIAS5%'], 'BIAS5状态': bias_bundle['BIAS5状态'],
+                'BIAS10%': bias_bundle['BIAS10%'], 'BIAS10状态': bias_bundle['BIAS10状态'],
+                'BIAS20%': bias_bundle['BIAS20%'], 'BIAS20状态': bias_bundle['BIAS20状态'],
+                'BIAS60%': bias_bundle['BIAS60%'], 'BIAS60状态': bias_bundle['BIAS60状态'],
             }
             results.append(row)
             if len(hist) >= 20:
@@ -1585,127 +1727,251 @@ if __name__ == "__main__":
             if errors:
                 pd.DataFrame({'错误详情': errors}).to_excel(writer, sheet_name='错误记录', index=False)
 
-            # ----- openpyxl 样式美化 -----
+            # ----- openpyxl 美化（易读 + 专业感）-----
             try:
-                from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+                from openpyxl.styles import PatternFill, Font, Alignment, Border, Side, numbers
                 from openpyxl.formatting.rule import ColorScaleRule, CellIsRule
                 from openpyxl.utils import get_column_letter
 
-                header_fill = PatternFill(start_color="1F497D", end_color="1F497D", fill_type="solid")
+                # 色板
+                header_fill = PatternFill(start_color="1B4F72", end_color="1B4F72", fill_type="solid")
                 header_font = Font(name="微软雅黑", size=10, bold=True, color="FFFFFF")
-                data_font = Font(name="微软雅黑", size=9)
-                thin_border = Border(
-                    left=Side(style='thin', color='E0E0E0'),
-                    right=Side(style='thin', color='E0E0E0'),
-                    top=Side(style='thin', color='E0E0E0'),
-                    bottom=Side(style='thin', color='E0E0E0')
+                data_font = Font(name="微软雅黑", size=9, color="2C3E50")
+                title_font = Font(name="微软雅黑", size=9, bold=True, color="1B4F72")
+                thin = Border(
+                    left=Side(style='thin', color='D5D8DC'),
+                    right=Side(style='thin', color='D5D8DC'),
+                    top=Side(style='thin', color='D5D8DC'),
+                    bottom=Side(style='thin', color='D5D8DC')
                 )
+                alt_fill = PatternFill(start_color="EBF5FB", end_color="EBF5FB", fill_type="solid")
+                white_fill = PatternFill(start_color="FFFFFF", end_color="FFFFFF", fill_type="solid")
                 rating_fills = {
-                    'S 级 (极强)': PatternFill(start_color="FFD700", end_color="FFD700", fill_type="solid"),
-                    'A 级 (强势)': PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid"),
-                    'B 级 (观察)': PatternFill(start_color="FFF2CC", end_color="FFF2CC", fill_type="solid"),
-                    'C 级 (弱势)': PatternFill(start_color="E2EFDA", end_color="E2EFDA", fill_type="solid"),
-                    'D 级 (风险)': PatternFill(start_color="D9D9D9", end_color="D9D9D9", fill_type="solid"),
+                    'S 级 (极强)': PatternFill(start_color="F9E79F", end_color="F9E79F", fill_type="solid"),
+                    'A 级 (强势)': PatternFill(start_color="F5B7B1", end_color="F5B7B1", fill_type="solid"),
+                    'B 级 (观察)': PatternFill(start_color="FCF3CF", end_color="FCF3CF", fill_type="solid"),
+                    'C 级 (弱势)': PatternFill(start_color="D5F5E3", end_color="D5F5E3", fill_type="solid"),
+                    'D 级 (风险)': PatternFill(start_color="E5E8E8", end_color="E5E8E8", fill_type="solid"),
                 }
-                risk_fill = PatternFill(start_color="FCE4EC", end_color="FCE4EC", fill_type="solid")
-                limit_fill = PatternFill(start_color="FFCDD2", end_color="FFCDD2", fill_type="solid")
+                risk_fill = PatternFill(start_color="FADBD8", end_color="FADBD8", fill_type="solid")
+                limit_fill = PatternFill(start_color="F1948A", end_color="F1948A", fill_type="solid")
+                ok_fill = PatternFill(start_color="D5F5E3", end_color="D5F5E3", fill_type="solid")
+                weak_fill = PatternFill(start_color="FDEBD0", end_color="FDEBD0", fill_type="solid")
+                warn_fill = PatternFill(start_color="FCF3CF", end_color="FCF3CF", fill_type="solid")
+                up_font = Font(name="微软雅黑", size=9, color="C0392B", bold=True)
+                down_font = Font(name="微软雅黑", size=9, color="196F3D", bold=True)
+                center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                left_al = Alignment(horizontal="left", vertical="center", wrap_text=True)
+                right_al = Alignment(horizontal="right", vertical="center")
+
+                # 百分比类 / 价格类列名
+                pct_like = {
+                    '今日涨跌幅%', '涨跌幅%', '3日涨%', '止损距离%', '收盘获利%',
+                    '换手率%', '20 日均换手率%', 'BIAS20%', 'BIAS5%', 'BIAS10%', 'BIAS60%',
+                    'BIAS20%', '连续3天振幅%', '60日最大回撤%', '20日年化波动%',
+                    '池内总分分位%', '池内RS分位%', '今日振幅', '振幅%'
+                }
+                price_like = {
+                    '最新价', '昨收', '今开', '今日最高', '今日最低', '今日均价',
+                    '今日开盘价', '今日收盘价', '平均成本', '短线支撑位', '短线压力位',
+                    '超短线支撑位', '超短线压力位', 'ATR 止损位',
+                    'MA5', 'MA7', 'MA10', 'MA20', 'MA60', 'MA120',
+                    '5日均线', '10日均线', '30日均线', '60日均线', '120日均线',
+                    '最高', '最低'
+                }
 
                 for sheetname in writer.book.sheetnames:
                     ws = writer.book[sheetname]
                     try:
-                        ws.views.sheetView[0].showGridLines = True
+                        ws.sheet_view.showGridLines = True
                     except Exception:
                         pass
-                    if sheetname in ('股票扫描结果', '一页纸决策', '大盘画像'):
+                    ws.row_dimensions[1].height = 26
+
+                    if sheetname in ('股票扫描结果', '一页纸决策', '大盘画像', '信号预警'):
                         ws.freeze_panes = 'C2'
                     else:
                         ws.freeze_panes = 'A2'
 
-                    for row_idx, row in enumerate(ws.iter_rows(min_row=1, max_row=ws.max_row, max_col=ws.max_column), start=1):
-                        for cell in row:
-                            cell.font = data_font
-                            cell.border = thin_border
+                    if ws.max_row >= 1 and ws.max_column >= 1:
+                        try:
+                            ws.auto_filter.ref = ws.dimensions
+                        except Exception:
+                            pass
+
+                    headers = [cell.value for cell in ws[1]] if ws.max_row >= 1 else []
+
+                    for row_idx in range(1, ws.max_row + 1):
+                        for col_idx in range(1, ws.max_column + 1):
+                            cell = ws.cell(row=row_idx, column=col_idx)
+                            cell.border = thin
                             if row_idx == 1:
                                 cell.fill = header_fill
                                 cell.font = header_font
-                                cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+                                cell.alignment = center
                             else:
+                                hname = headers[col_idx - 1] if col_idx - 1 < len(headers) else None
+                                # 斑马纹
+                                cell.fill = alt_fill if (row_idx % 2 == 0) else white_fill
                                 if isinstance(cell.value, (int, float)) and not isinstance(cell.value, bool):
-                                    cell.alignment = Alignment(horizontal="right", vertical="center")
-                                    if isinstance(cell.value, float):
+                                    cell.alignment = right_al
+                                    cell.font = data_font
+                                    if hname in pct_like or (isinstance(hname, str) and ('%' in hname or 'BIAS' in hname)):
+                                        cell.number_format = '0.00'
+                                    elif hname in price_like:
+                                        cell.number_format = '0.00'
+                                    elif isinstance(cell.value, float):
                                         cell.number_format = '0.00'
                                 else:
-                                    cell.alignment = Alignment(horizontal="left", vertical="center")
+                                    cell.alignment = left_al
+                                    cell.font = data_font
 
+                    # 列宽
                     for col in ws.columns:
                         max_len = 8
                         col_letter = get_column_letter(col[0].column)
-                        for cell in col[:120]:
+                        for cell in col[:100]:
                             val_str = str(cell.value or '')
                             try:
                                 byte_len = len(val_str.encode('gbk', errors='ignore'))
                             except Exception:
                                 byte_len = len(val_str)
-                            max_len = max(max_len, byte_len)
-                        ws.column_dimensions[col_letter].width = min(max_len / 2 + 3, 28)
+                            max_len = max(max_len, min(byte_len, 36))
+                        # 状态类列略宽
+                        h = headers[col[0].column - 1] if col[0].column - 1 < len(headers) else ''
+                        if isinstance(h, str) and ('状态' in h or '建议' in h or '形态' in h or '结论' in h or '标签' in h):
+                            ws.column_dimensions[col_letter].width = min(max(max_len / 2 + 3, 12), 28)
+                        else:
+                            ws.column_dimensions[col_letter].width = min(max_len / 2 + 2.2, 18)
 
-                    if sheetname not in ('股票扫描结果', '一页纸决策') or ws.max_row < 2:
+                    if ws.max_row < 2:
                         continue
 
-                    headers = [cell.value for cell in ws[1]]
+                    def col_idx_of(name):
+                        return headers.index(name) + 1 if name in headers else None
 
-                    if '评级' in headers:
-                        cidx = headers.index('评级') + 1
+                    def col_letter_of(name):
+                        i = col_idx_of(name)
+                        return get_column_letter(i) if i else None
+
+                    # 评级
+                    cidx = col_idx_of('评级')
+                    if cidx:
                         for r in range(2, ws.max_row + 1):
                             val = str(ws.cell(row=r, column=cidx).value or '')
                             if val in rating_fills:
                                 ws.cell(row=r, column=cidx).fill = rating_fills[val]
+                                ws.cell(row=r, column=cidx).font = Font(name="微软雅黑", size=9, bold=True)
+                                ws.cell(row=r, column=cidx).alignment = center
 
-                    if '总分' in headers:
-                        letter = get_column_letter(headers.index('总分') + 1)
-                        rule = ColorScaleRule(
-                            start_type='num', start_value=20, start_color='F8696B',
-                            mid_type='num', mid_value=50, mid_color='FFEB84',
-                            end_type='num', end_value=85, end_color='63BE7B'
-                        )
-                        ws.conditional_formatting.add(f'{letter}2:{letter}{ws.max_row}', rule)
+                    # 色阶：总分 / 分位 / RS
+                    for col_name, lo, mid, hi in [
+                        ('总分', 15, 50, 85),
+                        ('池内总分分位%', 0, 50, 100),
+                        ('相对强度 RS', 0.7, 1.0, 1.3),
+                        ('ADX 趋势强度', 15, 25, 40),
+                    ]:
+                        letter = col_letter_of(col_name)
+                        if letter:
+                            ws.conditional_formatting.add(
+                                f'{letter}2:{letter}{ws.max_row}',
+                                ColorScaleRule(
+                                    start_type='num', start_value=lo, start_color='F1948A',
+                                    mid_type='num', mid_value=mid, mid_color='F9E79F',
+                                    end_type='num', end_value=hi, end_color='82E0AA'
+                                )
+                            )
 
-                    if '今日涨跌幅%' in headers:
-                        letter = get_column_letter(headers.index('今日涨跌幅%') + 1)
-                        ws.conditional_formatting.add(
-                            f'{letter}2:{letter}{ws.max_row}',
-                            CellIsRule(operator='greaterThan', formula=['0'],
-                                       fill=PatternFill(start_color='FFCDD2', end_color='FFCDD2', fill_type='solid'))
-                        )
-                        ws.conditional_formatting.add(
-                            f'{letter}2:{letter}{ws.max_row}',
-                            CellIsRule(operator='lessThan', formula=['0'],
-                                       fill=PatternFill(start_color='C8E6C9', end_color='C8E6C9', fill_type='solid'))
-                        )
+                    # 涨跌幅红绿字
+                    for col_name in ('今日涨跌幅%', '涨跌幅%', '3日涨%', '收盘获利%'):
+                        cidx = col_idx_of(col_name)
+                        if not cidx:
+                            continue
+                        for r in range(2, ws.max_row + 1):
+                            cell = ws.cell(row=r, column=cidx)
+                            try:
+                                v = float(cell.value)
+                            except Exception:
+                                continue
+                            if v > 0:
+                                cell.font = up_font
+                            elif v < 0:
+                                cell.font = down_font
 
-                    if '风险标签' in headers:
-                        cidx = headers.index('风险标签') + 1
+                    # 风险 / 涨停
+                    cidx = col_idx_of('风险标签')
+                    if cidx:
                         for r in range(2, ws.max_row + 1):
                             val = str(ws.cell(row=r, column=cidx).value or '')
                             if val and val != '正常':
                                 ws.cell(row=r, column=cidx).fill = risk_fill
+                            elif val == '正常':
+                                ws.cell(row=r, column=cidx).fill = ok_fill
 
-                    if '盘中涨停' in headers:
-                        cidx = headers.index('盘中涨停') + 1
+                    cidx = col_idx_of('盘中涨停')
+                    if cidx:
                         for r in range(2, ws.max_row + 1):
                             val = str(ws.cell(row=r, column=cidx).value or '')
+                            cell = ws.cell(row=r, column=cidx)
+                            cell.alignment = center
                             if val and val != '否':
-                                ws.cell(row=r, column=cidx).fill = limit_fill
+                                cell.fill = limit_fill
+                                cell.font = Font(name="微软雅黑", size=9, bold=True, color="7B241C")
 
-                    if '池内总分分位%' in headers:
-                        letter = get_column_letter(headers.index('池内总分分位%') + 1)
-                        rule = ColorScaleRule(
-                            start_type='num', start_value=0, start_color='F8696B',
-                            mid_type='num', mid_value=50, mid_color='FFEB84',
-                            end_type='num', end_value=100, end_color='63BE7B'
-                        )
-                        ws.conditional_formatting.add(f'{letter}2:{letter}{ws.max_row}', rule)
+                    # 大盘 / MA60
+                    for col_name in ('大盘环境', '相对MA60'):
+                        cidx = col_idx_of(col_name)
+                        if not cidx:
+                            continue
+                        for r in range(2, ws.max_row + 1):
+                            val = str(ws.cell(row=r, column=cidx).value or '')
+                            if any(k in val for k in ('强势', '偏强', '站上')):
+                                ws.cell(row=r, column=cidx).fill = ok_fill
+                            elif any(k in val for k in ('弱势', '偏弱', '跌破')):
+                                ws.cell(row=r, column=cidx).fill = weak_fill
 
+                    # ADX / 止损 / BIAS 状态
+                    overbought = ('极度超买', '超买偏强')
+                    oversold = ('极度超卖', '超卖偏弱')
+                    for col_name in ('ADX市场状态', '止损距离状态', 'BIAS5状态', 'BIAS10状态', 'BIAS20状态', 'BIAS60状态'):
+                        cidx = col_idx_of(col_name)
+                        if not cidx:
+                            continue
+                        for r in range(2, ws.max_row + 1):
+                            val = str(ws.cell(row=r, column=cidx).value or '')
+                            cell = ws.cell(row=r, column=cidx)
+                            cell.alignment = center
+                            if any(k in val for k in overbought) or val in ('超强趋势', '剧烈波动/深回撤中'):
+                                cell.fill = risk_fill
+                            elif any(k in val for k in oversold) or val in ('无趋势', '极低波动盘整'):
+                                cell.fill = weak_fill
+                            elif val in ('强趋势', '极强趋势', '健康趋势行情', '中性区间', '趋势形成中'):
+                                cell.fill = ok_fill if val != '趋势形成中' else warn_fill
+                            elif val == '低波动平稳期':
+                                cell.fill = warn_fill
+
+                    # 名称加粗
+                    for name_col in ('股票名称', '指数名称'):
+                        cidx = col_idx_of(name_col)
+                        if cidx:
+                            for r in range(2, ws.max_row + 1):
+                                ws.cell(row=r, column=cidx).font = title_font
+
+                    # 一页纸 / 大盘：操作建议、趋势结论
+                    for col_name in ('操作建议', '趋势结论', '信号标签', '策略命中'):
+                        cidx = col_idx_of(col_name)
+                        if not cidx:
+                            continue
+                        for r in range(2, ws.max_row + 1):
+                            ws.cell(row=r, column=cidx).alignment = left_al
+                            if col_name in ('操作建议', '趋势结论'):
+                                ws.cell(row=r, column=cidx).font = title_font
+
+                    if sheetname in ('大盘画像', '一页纸决策'):
+                        for r in range(2, min(ws.max_row + 1, 40)):
+                            ws.row_dimensions[r].height = 22
+
+                    # 手册/统计：表头已够用
             except Exception as style_e:
                 print(f"  ⚠️ Excel美化部分失败（数据已正常写出）: {style_e}")
 
