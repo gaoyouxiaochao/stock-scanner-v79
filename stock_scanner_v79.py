@@ -312,6 +312,116 @@ def fetch_index_hist(symbol, end_date_str, name=''):
     print(f"  ❌ 指数 {label} 全部来源失败")
     return None
 
+
+def build_market_profile_row(hist, name, code):
+    """大盘画像单行：报价摘要 + 均线 + 支撑压力 + 形态"""
+    row = {
+        '指数名称': name,
+        '指数代码': code,
+        '最新价': 0.0,
+        '昨收': 0.0,
+        '今开': 0.0,
+        '最高': 0.0,
+        '最低': 0.0,
+        '涨跌幅%': 0.0,
+        '振幅%': 0.0,
+        '5日均线': 0.0,
+        '10日均线': 0.0,
+        '30日均线': 0.0,
+        '60日均线': 0.0,
+        '120日均线': 0.0,
+        '短线支撑位': 0.0,
+        '短线压力位': 0.0,
+        '超短线支撑位': 0.0,
+        '超短线压力位': 0.0,
+        'MACD金叉': '无',
+        '技术形态': '',
+        'K线形态': '',
+        '大阳次数': 0,
+        '相对MA60': '',
+        '趋势结论': '',
+    }
+    if hist is None or len(hist) < 5:
+        row['趋势结论'] = '数据不足'
+        return row
+
+    last = hist.iloc[-1]
+    close = float(last['close'])
+    open_p = float(last['open']) if 'open' in hist.columns else close
+    high = float(last['high']) if 'high' in hist.columns else close
+    low = float(last['low']) if 'low' in hist.columns else close
+    prev = float(hist['close'].iloc[-2]) if len(hist) >= 2 else close
+    row['最新价'] = round(close, 2)
+    row['昨收'] = round(prev, 2)
+    row['今开'] = round(open_p, 2)
+    row['最高'] = round(high, 2)
+    row['最低'] = round(low, 2)
+    if prev > EPSILON:
+        row['涨跌幅%'] = round((close / prev - 1) * 100, 2)
+        row['振幅%'] = round((high - low) / prev * 100, 2)
+
+    c = hist['close']
+    for n, key in [(5, '5日均线'), (10, '10日均线'), (30, '30日均线'), (60, '60日均线'), (120, '120日均线')]:
+        if len(c) >= n:
+            row[key] = round(float(c.tail(n).mean()), 3)
+
+    try:
+        sup, res, ssup, sres = calculate_support_resistance(hist)
+        row['短线支撑位'] = sup
+        row['短线压力位'] = res
+        row['超短线支撑位'] = ssup
+        row['超短线压力位'] = sres
+    except Exception:
+        pass
+    try:
+        row['MACD金叉'] = check_macd_golden_cross(hist)
+    except Exception:
+        pass
+    try:
+        hist_ind = precompute_indicators(hist)
+        row['技术形态'] = detect_technical_patterns(hist_ind)
+    except Exception:
+        pass
+    try:
+        row['K线形态'] = detect_kline_patterns(hist)
+    except Exception:
+        pass
+    try:
+        df = hist.tail(61).copy()
+        if len(df) >= 2:
+            prev_c = df['close'].shift(1)
+            pct = (df['close'] / prev_c - 1) * 100
+            rng = (df['high'] - df['low']).replace(0, np.nan)
+            pos = (df['close'] - df['low']) / rng
+            big = ((pct >= 2.0) & (pos >= 0.7)).fillna(False).sum()
+            row['大阳次数'] = int(big)
+    except Exception:
+        pass
+
+    ma60 = row['60日均线']
+    if ma60 and ma60 > EPSILON:
+        if close > ma60 * 1.002:
+            row['相对MA60'] = '站上MA60'
+        elif close < ma60 * 0.998:
+            row['相对MA60'] = '跌破MA60'
+        else:
+            row['相对MA60'] = '贴近MA60'
+    # 简单趋势结论
+    parts = []
+    if row['相对MA60']:
+        parts.append(row['相对MA60'])
+    if row['技术形态'] and row['技术形态'] != '无明显形态':
+        parts.append(row['技术形态'])
+    if row['MACD金叉'] and row['MACD金叉'] != '否':
+        parts.append(str(row['MACD金叉']))
+    if row['涨跌幅%'] > 1:
+        parts.append('日内偏强')
+    elif row['涨跌幅%'] < -1:
+        parts.append('日内偏弱')
+    row['趋势结论'] = ' | '.join(parts) if parts else '中性观望'
+    return row
+
+
 def build_index_snapshot(hist, prefix):
     out = {}
     ma_map = [(5, '5日均线'), (10, '10日均线'), (30, '30日均线'), (60, '60日均线'), (120, '120日均线')]
@@ -347,7 +457,9 @@ def build_index_snapshot(hist, prefix):
     except Exception:
         out[f'{prefix}MACD金叉'] = '无'
     try:
-        out[f'{prefix}技术形态'] = detect_technical_patterns(hist)
+        # 技术形态依赖 ma5/ma10/ma20，需先预计算
+        hist_ind = precompute_indicators(hist)
+        out[f'{prefix}技术形态'] = detect_technical_patterns(hist_ind)
     except Exception:
         out[f'{prefix}技术形态'] = ''
     try:
@@ -1169,12 +1281,16 @@ if __name__ == "__main__":
     market_regime, hs300_last, hs300_ma60 = detect_market_regime(hs300, 60)
     print(f"🌡 大盘环境（沪深300 vs MA60）：{market_regime} | 点位≈{hs300_last:.2f} MA60≈{hs300_ma60}")
 
-    print("📡 获取上证/深证指数快照（均线+支撑压力+形态）...")
+    print("📡 获取上证/深证指数 → 大盘画像...")
     sh_hist = fetch_index_hist("000001", END_DATE_STR, "上证指数")
     sz_hist = fetch_index_hist("399001", END_DATE_STR, "深证成指")
-    sh_snap = build_index_snapshot(sh_hist, "上证")
-    sz_snap = build_index_snapshot(sz_hist, "深证")
-    print(f"  上证MA5={sh_snap.get('上证5日均线', 0)} 深证MA5={sz_snap.get('深证5日均线', 0)}")
+    market_profile_rows = [
+        build_market_profile_row(sh_hist, "上证指数", "000001"),
+        build_market_profile_row(sz_hist, "深证成指", "399001"),
+    ]
+    df_market_profile = pd.DataFrame(market_profile_rows)
+    print(f"  上证最新={market_profile_rows[0].get('最新价')} MA5={market_profile_rows[0].get('5日均线')} | "
+          f"深证最新={market_profile_rows[1].get('最新价')} MA5={market_profile_rows[1].get('5日均线')}")
 
     input_path = None
     for p in POSSIBLE_INPUTS:
@@ -1345,8 +1461,6 @@ if __name__ == "__main__":
                 'MA5': stock_mas['MA5'], 'MA7': stock_mas['MA7'], 'MA10': stock_mas['MA10'],
                 'MA60': stock_mas['MA60'], 'MA120': stock_mas['MA120'],
             }
-            row.update(sh_snap)
-            row.update(sz_snap)
             results.append(row)
             if len(hist) >= 20:
                 # 放量倍数：用历史K线「股」口径，避免与展示单位(万手)混算
@@ -1436,6 +1550,17 @@ if __name__ == "__main__":
             df_one = df_final[one_page_cols].copy() if one_page_cols else df_final.iloc[:, :6].copy()
             df_one.to_excel(writer, sheet_name='一页纸决策', index=False)
 
+            # 大盘画像：上证/深证独立一页（不塞进个股结果）
+            try:
+                df_market_profile.to_excel(writer, sheet_name='大盘画像', index=False)
+            except Exception:
+                pd.DataFrame([{'说明': '大盘画像生成失败'}]).to_excel(writer, sheet_name='大盘画像', index=False)
+
+            # 个股结果去掉误带的上证/深证列（兼容旧缓存行）
+            drop_idx_cols = [c for c in df_final.columns if str(c).startswith('上证') or str(c).startswith('深证')]
+            if drop_idx_cols:
+                df_final = df_final.drop(columns=drop_idx_cols, errors='ignore')
+
             df_final.to_excel(writer, sheet_name='股票扫描结果', index=False)
             df_volume.to_excel(writer, sheet_name='今日放量Top20', index=False)
 
@@ -1491,7 +1616,7 @@ if __name__ == "__main__":
                         ws.views.sheetView[0].showGridLines = True
                     except Exception:
                         pass
-                    if sheetname in ('股票扫描结果', '一页纸决策'):
+                    if sheetname in ('股票扫描结果', '一页纸决策', '大盘画像'):
                         ws.freeze_panes = 'C2'
                     else:
                         ws.freeze_panes = 'A2'
