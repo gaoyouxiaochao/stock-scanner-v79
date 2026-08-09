@@ -1,4 +1,4 @@
-name: 每日A股强势股扫描 (北京时间17:00)
+name: Daily A-share scan
 
 on:
   schedule:
@@ -12,60 +12,44 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     steps:
-      - name: 检出代码
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: 设置 Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
 
-      - name: 安装依赖
+      - name: Install deps
         run: |
           python -m pip install --upgrade pip
           pip install pandas numpy akshare baostock tqdm openpyxl requests
 
-      - name: 运行强势股扫描器
+      - name: Run scanner
         run: python stock_scanner_v79.py
 
-      - name: 提交结果并推送微信
+      - name: Commit and PushPlus
         env:
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-
           mkdir -p results
           FILE=$(ls -t results/*.xlsx 2>/dev/null | head -n 1 || true)
-
           if [ -z "$FILE" ]; then
-            echo "没有生成 Excel，跳过推送"
+            echo "No xlsx found, skip push"
             exit 0
           fi
-
           git add results/
-          if git diff --staged --quiet; then
-            echo "结果无变化，仍推送已有文件链接"
-          else
-            git commit -m "auto: stock scan $(date '+%Y-%m-%d %H:%M:%S')"
+          if ! git diff --staged --quiet; then
+            git commit -m "auto stock scan"
             git push
           fi
-
           FILENAME=$(basename "$FILE")
           PAGE_URL="https://github.com/${{ github.repository }}/blob/main/results/${FILENAME}"
           RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/results/${FILENAME}"
-
-          TITLE="A-share scan $(date '+%Y-%m-%d')"
-          CONTENT="Scan done.
-
-View/Download:
-${PAGE_URL}
-
-Direct Excel:
-${RAW_URL}
-
-File: ${FILENAME}"
-
+          TITLE="A-share scan result"
+          CONTENT="Scan finished. View: ${PAGE_URL}  Download: ${RAW_URL}  File: ${FILENAME}"
           curl -s -X POST "http://www.pushplus.plus/send" \
             -H "Content-Type: application/json" \
             -d "{\"token\":\"${PUSHPLUS_TOKEN}\",\"title\":\"${TITLE}\",\"content\":\"${CONTENT}\",\"template\":\"txt\"}"
