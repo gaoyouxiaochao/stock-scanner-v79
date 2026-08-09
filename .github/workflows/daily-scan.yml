@@ -1,8 +1,9 @@
-name: 每日A股强势股扫描 (北京时间17:00)
+name: 每日A股强势股扫描
 
 on:
   schedule:
-    - cron: '0 9 * * 1-5'   # UTC 09:00 = 北京时间 17:00，周一到周五
+    - cron: '0 4 * * 1-5'   # UTC 04:00 = 北京 12:00（上午盘后）
+    - cron: '0 8 * * 1-5'   # UTC 08:00 = 北京 16:00（下午盘后）
   workflow_dispatch:
 
 permissions:
@@ -28,53 +29,46 @@ jobs:
       - name: 运行强势股扫描器
         run: python stock_scanner_v79.py
 
-      - name: 提交结果并微信推送 Download 链接
+      - name: 提交结果并推送微信下载链接
         env:
           PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
         run: |
           set -e
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          mkdir -p results
 
-          # 优先使用本次生成的固定文件名
-          if [ -f results/latest.xlsx ]; then
-            FILE="results/latest.xlsx"
-          else
-            FILE=$(ls -t results/*.xlsx 2>/dev/null | head -n 1 || true)
-          fi
-
+          # 找到最新生成的 Excel（脚本输出中文名时间戳文件）
+          FILE=$(ls -t results/*.xlsx 2>/dev/null | head -n 1 || true)
           if [ -z "$FILE" ] || [ ! -f "$FILE" ]; then
             echo "没有生成 Excel，跳过推送"
             exit 0
           fi
 
-          echo "将提交文件: $FILE"
+          # 复制为固定英文文件名 latest.xlsx
+          cp "$FILE" results/latest.xlsx
+          echo "原始文件: $FILE -> latest.xlsx"
 
-          # results 可能被 gitignore，强制加入
-          git add -f results/latest.xlsx 2>/dev/null || true
-          git add -f results/*.xlsx 2>/dev/null || true
-
+          # 提交到仓库（只提交 latest.xlsx，不堆积历史文件）
+          git add -f results/latest.xlsx
           if ! git diff --staged --quiet; then
             git commit -m "auto stock scan $(date -u '+%Y-%m-%d %H:%M') UTC"
             git push
           else
-            echo "无文件变更（可能 latest 内容相同），仍推送下载链接"
+            echo "无文件变更，仍推送下载链接"
           fi
 
-          # 固定英文路径，无中文、无历史时间戳混淆
-          RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/results/latest.xlsx"
-
-          echo "Download URL: $RAW_URL"
+          # 用 github.com 域名（微信可直接点击，raw.githubusercontent.com 常被拦截）
+          DL_URL="https://github.com/${{ github.repository }}/raw/main/results/latest.xlsx"
 
           if [ -z "${PUSHPLUS_TOKEN}" ]; then
             echo "未配置 PUSHPLUS_TOKEN，跳过微信推送"
             exit 0
           fi
 
-          # 微信只推这一条 Download 链接
+          # 推送微信消息（html 模板，点击即下载）
+          SCAN_DATE=$(TZ='Asia/Shanghai' date '+%m月%d日 %H:%M')
           curl -sS -X POST "http://www.pushplus.plus/send" \
             -H "Content-Type: application/json" \
-            -d "{\"token\":\"${PUSHPLUS_TOKEN}\",\"title\":\"A-share scan Download\",\"content\":\"${RAW_URL}\",\"template\":\"txt\"}"
+            -d "{\"token\":\"${PUSHPLUS_TOKEN}\",\"title\":\"A股扫描报告 ${SCAN_DATE}\",\"content\":\"<a href=\\\"${DL_URL}\\\">点击下载 Excel 报告</a>\",\"template\":\"html\"}"
 
           echo "PushPlus 已发送"
