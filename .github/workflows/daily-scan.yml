@@ -40,7 +40,7 @@ jobs:
             echo "No xlsx found, skip push"
             exit 0
           fi
-          git add results/
+          git add -f results/
           if ! git diff --staged --quiet; then
             git commit -m "auto stock scan"
             git push
@@ -49,7 +49,7 @@ jobs:
           PAGE_URL="https://github.com/${{ github.repository }}/blob/main/results/${FILENAME}"
           RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/results/${FILENAME}"
           TITLE="A-share scan result"
-          CONTENT="Scan finished. View: ${PAGE_URL}  Download: ${RAW_URL}  File: ${FILENAME}"
+          CONTENT="Scan finished. View: ${PAGE_URL} Download: ${RAW_URL} File: ${FILENAME}"
           curl -s -X POST "http://www.pushplus.plus/send" \
             -H "Content-Type: application/json" \
             -d "{\"token\":\"${PUSHPLUS_TOKEN}\",\"title\":\"${TITLE}\",\"content\":\"${CONTENT}\",\"template\":\"txt\"}"
