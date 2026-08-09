@@ -1727,17 +1727,16 @@ if __name__ == "__main__":
             if errors:
                 pd.DataFrame({'错误详情': errors}).to_excel(writer, sheet_name='错误记录', index=False)
 
-            # ----- openpyxl 美化（易读 + 专业感）-----
+            # ----- openpyxl 美化：无筛选 / 居中 / 雅黑8号 / 列宽适中 -----
             try:
-                from openpyxl.styles import PatternFill, Font, Alignment, Border, Side, numbers
-                from openpyxl.formatting.rule import ColorScaleRule, CellIsRule
+                from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
+                from openpyxl.formatting.rule import ColorScaleRule
                 from openpyxl.utils import get_column_letter
 
-                # 色板
                 header_fill = PatternFill(start_color="1B4F72", end_color="1B4F72", fill_type="solid")
-                header_font = Font(name="微软雅黑", size=10, bold=True, color="FFFFFF")
-                data_font = Font(name="微软雅黑", size=9, color="2C3E50")
-                title_font = Font(name="微软雅黑", size=9, bold=True, color="1B4F72")
+                header_font = Font(name="微软雅黑", size=8, bold=True, color="FFFFFF")
+                data_font = Font(name="微软雅黑", size=8, color="2C3E50")
+                title_font = Font(name="微软雅黑", size=8, bold=True, color="1B4F72")
                 thin = Border(
                     left=Side(style='thin', color='D5D8DC'),
                     right=Side(style='thin', color='D5D8DC'),
@@ -1758,27 +1757,9 @@ if __name__ == "__main__":
                 ok_fill = PatternFill(start_color="D5F5E3", end_color="D5F5E3", fill_type="solid")
                 weak_fill = PatternFill(start_color="FDEBD0", end_color="FDEBD0", fill_type="solid")
                 warn_fill = PatternFill(start_color="FCF3CF", end_color="FCF3CF", fill_type="solid")
-                up_font = Font(name="微软雅黑", size=9, color="C0392B", bold=True)
-                down_font = Font(name="微软雅黑", size=9, color="196F3D", bold=True)
+                up_font = Font(name="微软雅黑", size=8, color="C0392B", bold=True)
+                down_font = Font(name="微软雅黑", size=8, color="196F3D", bold=True)
                 center = Alignment(horizontal="center", vertical="center", wrap_text=True)
-                left_al = Alignment(horizontal="left", vertical="center", wrap_text=True)
-                right_al = Alignment(horizontal="right", vertical="center")
-
-                # 百分比类 / 价格类列名
-                pct_like = {
-                    '今日涨跌幅%', '涨跌幅%', '3日涨%', '止损距离%', '收盘获利%',
-                    '换手率%', '20 日均换手率%', 'BIAS20%', 'BIAS5%', 'BIAS10%', 'BIAS60%',
-                    'BIAS20%', '连续3天振幅%', '60日最大回撤%', '20日年化波动%',
-                    '池内总分分位%', '池内RS分位%', '今日振幅', '振幅%'
-                }
-                price_like = {
-                    '最新价', '昨收', '今开', '今日最高', '今日最低', '今日均价',
-                    '今日开盘价', '今日收盘价', '平均成本', '短线支撑位', '短线压力位',
-                    '超短线支撑位', '超短线压力位', 'ATR 止损位',
-                    'MA5', 'MA7', 'MA10', 'MA20', 'MA60', 'MA120',
-                    '5日均线', '10日均线', '30日均线', '60日均线', '120日均线',
-                    '最高', '最低'
-                }
 
                 for sheetname in writer.book.sheetnames:
                     ws = writer.book[sheetname]
@@ -1786,18 +1767,17 @@ if __name__ == "__main__":
                         ws.sheet_view.showGridLines = True
                     except Exception:
                         pass
-                    ws.row_dimensions[1].height = 26
+                    # 关闭自动筛选（不出现下拉箭头）
+                    try:
+                        ws.auto_filter.ref = None
+                    except Exception:
+                        pass
 
+                    ws.row_dimensions[1].height = 20
                     if sheetname in ('股票扫描结果', '一页纸决策', '大盘画像', '信号预警'):
                         ws.freeze_panes = 'C2'
                     else:
                         ws.freeze_panes = 'A2'
-
-                    if ws.max_row >= 1 and ws.max_column >= 1:
-                        try:
-                            ws.auto_filter.ref = ws.dimensions
-                        except Exception:
-                            pass
 
                     headers = [cell.value for cell in ws[1]] if ws.max_row >= 1 else []
 
@@ -1805,44 +1785,35 @@ if __name__ == "__main__":
                         for col_idx in range(1, ws.max_column + 1):
                             cell = ws.cell(row=row_idx, column=col_idx)
                             cell.border = thin
+                            cell.alignment = center
                             if row_idx == 1:
                                 cell.fill = header_fill
                                 cell.font = header_font
-                                cell.alignment = center
                             else:
-                                hname = headers[col_idx - 1] if col_idx - 1 < len(headers) else None
-                                # 斑马纹
                                 cell.fill = alt_fill if (row_idx % 2 == 0) else white_fill
-                                if isinstance(cell.value, (int, float)) and not isinstance(cell.value, bool):
-                                    cell.alignment = right_al
-                                    cell.font = data_font
-                                    if hname in pct_like or (isinstance(hname, str) and ('%' in hname or 'BIAS' in hname)):
-                                        cell.number_format = '0.00'
-                                    elif hname in price_like:
-                                        cell.number_format = '0.00'
-                                    elif isinstance(cell.value, float):
-                                        cell.number_format = '0.00'
-                                else:
-                                    cell.alignment = left_al
-                                    cell.font = data_font
+                                cell.font = data_font
+                                if isinstance(cell.value, float):
+                                    cell.number_format = '0.00'
 
-                    # 列宽
+                    # 列宽：整体略宽，避免 ###；状态/结论列更宽
                     for col in ws.columns:
-                        max_len = 8
                         col_letter = get_column_letter(col[0].column)
-                        for cell in col[:100]:
-                            val_str = str(cell.value or '')
+                        max_len = 10
+                        for cell in col[:120]:
+                            val_str = str(cell.value if cell.value is not None else '')
                             try:
                                 byte_len = len(val_str.encode('gbk', errors='ignore'))
                             except Exception:
                                 byte_len = len(val_str)
-                            max_len = max(max_len, min(byte_len, 36))
-                        # 状态类列略宽
+                            max_len = max(max_len, min(byte_len, 48))
                         h = headers[col[0].column - 1] if col[0].column - 1 < len(headers) else ''
-                        if isinstance(h, str) and ('状态' in h or '建议' in h or '形态' in h or '结论' in h or '标签' in h):
-                            ws.column_dimensions[col_letter].width = min(max(max_len / 2 + 3, 12), 28)
+                        if isinstance(h, str) and any(k in h for k in ('状态', '建议', '形态', '结论', '标签', '趋势', '解读')):
+                            width = min(max(max_len / 1.6 + 4, 14), 36)
+                        elif isinstance(h, str) and any(k in h for k in ('均线', '支撑', '压力', '最新', '最高', '最低')):
+                            width = min(max(max_len / 1.6 + 3, 12), 16)
                         else:
-                            ws.column_dimensions[col_letter].width = min(max_len / 2 + 2.2, 18)
+                            width = min(max(max_len / 1.7 + 3, 11), 20)
+                        ws.column_dimensions[col_letter].width = width
 
                     if ws.max_row < 2:
                         continue
@@ -1854,17 +1825,14 @@ if __name__ == "__main__":
                         i = col_idx_of(name)
                         return get_column_letter(i) if i else None
 
-                    # 评级
                     cidx = col_idx_of('评级')
                     if cidx:
                         for r in range(2, ws.max_row + 1):
                             val = str(ws.cell(row=r, column=cidx).value or '')
                             if val in rating_fills:
                                 ws.cell(row=r, column=cidx).fill = rating_fills[val]
-                                ws.cell(row=r, column=cidx).font = Font(name="微软雅黑", size=9, bold=True)
-                                ws.cell(row=r, column=cidx).alignment = center
+                                ws.cell(row=r, column=cidx).font = Font(name="微软雅黑", size=8, bold=True)
 
-                    # 色阶：总分 / 分位 / RS
                     for col_name, lo, mid, hi in [
                         ('总分', 15, 50, 85),
                         ('池内总分分位%', 0, 50, 100),
@@ -1882,7 +1850,6 @@ if __name__ == "__main__":
                                 )
                             )
 
-                    # 涨跌幅红绿字
                     for col_name in ('今日涨跌幅%', '涨跌幅%', '3日涨%', '收盘获利%'):
                         cidx = col_idx_of(col_name)
                         if not cidx:
@@ -1898,7 +1865,6 @@ if __name__ == "__main__":
                             elif v < 0:
                                 cell.font = down_font
 
-                    # 风险 / 涨停
                     cidx = col_idx_of('风险标签')
                     if cidx:
                         for r in range(2, ws.max_row + 1):
@@ -1912,13 +1878,11 @@ if __name__ == "__main__":
                     if cidx:
                         for r in range(2, ws.max_row + 1):
                             val = str(ws.cell(row=r, column=cidx).value or '')
-                            cell = ws.cell(row=r, column=cidx)
-                            cell.alignment = center
                             if val and val != '否':
+                                cell = ws.cell(row=r, column=cidx)
                                 cell.fill = limit_fill
-                                cell.font = Font(name="微软雅黑", size=9, bold=True, color="7B241C")
+                                cell.font = Font(name="微软雅黑", size=8, bold=True, color="7B241C")
 
-                    # 大盘 / MA60
                     for col_name in ('大盘环境', '相对MA60'):
                         cidx = col_idx_of(col_name)
                         if not cidx:
@@ -1930,7 +1894,6 @@ if __name__ == "__main__":
                             elif any(k in val for k in ('弱势', '偏弱', '跌破')):
                                 ws.cell(row=r, column=cidx).fill = weak_fill
 
-                    # ADX / 止损 / BIAS 状态
                     overbought = ('极度超买', '超买偏强')
                     oversold = ('极度超卖', '超卖偏弱')
                     for col_name in ('ADX市场状态', '止损距离状态', 'BIAS5状态', 'BIAS10状态', 'BIAS20状态', 'BIAS60状态'):
@@ -1940,38 +1903,25 @@ if __name__ == "__main__":
                         for r in range(2, ws.max_row + 1):
                             val = str(ws.cell(row=r, column=cidx).value or '')
                             cell = ws.cell(row=r, column=cidx)
-                            cell.alignment = center
                             if any(k in val for k in overbought) or val in ('超强趋势', '剧烈波动/深回撤中'):
                                 cell.fill = risk_fill
                             elif any(k in val for k in oversold) or val in ('无趋势', '极低波动盘整'):
                                 cell.fill = weak_fill
-                            elif val in ('强趋势', '极强趋势', '健康趋势行情', '中性区间', '趋势形成中'):
-                                cell.fill = ok_fill if val != '趋势形成中' else warn_fill
-                            elif val == '低波动平稳期':
+                            elif val in ('强趋势', '极强趋势', '健康趋势行情', '中性区间'):
+                                cell.fill = ok_fill
+                            elif val in ('趋势形成中', '低波动平稳期'):
                                 cell.fill = warn_fill
 
-                    # 名称加粗
                     for name_col in ('股票名称', '指数名称'):
                         cidx = col_idx_of(name_col)
                         if cidx:
                             for r in range(2, ws.max_row + 1):
                                 ws.cell(row=r, column=cidx).font = title_font
 
-                    # 一页纸 / 大盘：操作建议、趋势结论
-                    for col_name in ('操作建议', '趋势结论', '信号标签', '策略命中'):
-                        cidx = col_idx_of(col_name)
-                        if not cidx:
-                            continue
-                        for r in range(2, ws.max_row + 1):
-                            ws.cell(row=r, column=cidx).alignment = left_al
-                            if col_name in ('操作建议', '趋势结论'):
-                                ws.cell(row=r, column=cidx).font = title_font
-
                     if sheetname in ('大盘画像', '一页纸决策'):
-                        for r in range(2, min(ws.max_row + 1, 40)):
-                            ws.row_dimensions[r].height = 22
+                        for r in range(2, min(ws.max_row + 1, 50)):
+                            ws.row_dimensions[r].height = 18
 
-                    # 手册/统计：表头已够用
             except Exception as style_e:
                 print(f"  ⚠️ Excel美化部分失败（数据已正常写出）: {style_e}")
 
