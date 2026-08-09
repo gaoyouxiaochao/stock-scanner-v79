@@ -4,6 +4,7 @@
 - 扩展实时字段 + 连涨/3日指标
 - 修复：涨幅相对昨收、20日突破排除当日、交易日回退、异常捕获
 - 修复：RS除零、连续涨停计数、shift首行NaN、OBV窗口、止损语义
+- 增强：RS merge对齐、突破/超跌信号、回撤波动、获利回退、信号预警Sheet
 - 32只/424只均可稳定运行 """
 
 import pandas as pd
@@ -658,18 +659,27 @@ def get_risk_control(hist, code=""):
     stop_loss = min(stop_loss, close * 0.98)
     return round(max(stop_loss, 0), 2)
 
-def calculate_relative_strength(hist, hs300_df):
-    if len(hist) < 60 or hs300_df is None or len(hs300_df) < 60:
+def calculate_relative_strength(hist, hs300_df, window=60):
+    """个股相对沪深300强度：按交易日 merge 对齐后算收益比"""
+    if hist is None or hs300_df is None or len(hist) < 20 or len(hs300_df) < 20:
         return 0.0, 0
-    hist_recent = hist.tail(60)
-    hist_dates = set(hist_recent['date'])
-    hs300_aligned = hs300_df[hs300_df['date'].isin(hist_dates)]
-    if len(hs300_aligned) < 48:
+    h = hist.copy()
+    idx = hs300_df.copy()
+    h['date'] = pd.to_datetime(h['date']).dt.normalize()
+    idx['date'] = pd.to_datetime(idx['date']).dt.normalize()
+    h = h.sort_values('date').drop_duplicates('date', keep='last')
+    idx = idx.sort_values('date').drop_duplicates('date', keep='last')
+    merged = pd.merge(
+        h[['date', 'close']].rename(columns={'close': 'close_s'}),
+        idx[['date', 'close']].rename(columns={'close': 'close_i'}),
+        on='date', how='inner'
+    )
+    need = max(20, window // 2)
+    if len(merged) < need:
         return 0.0, 0
-    s0 = float(hist_recent['close'].iloc[0])
-    s1 = float(hist_recent['close'].iloc[-1])
-    i0 = float(hs300_aligned['close'].iloc[0])
-    i1 = float(hs300_aligned['close'].iloc[-1])
+    merged = merged.tail(min(window, len(merged)))
+    s0, s1 = float(merged['close_s'].iloc[0]), float(merged['close_s'].iloc[-1])
+    i0, i1 = float(merged['close_i'].iloc[0]), float(merged['close_i'].iloc[-1])
     if s0 <= EPSILON or i0 <= EPSILON:
         return 0.0, 0
     stock_ret = s1 / s0
@@ -678,7 +688,84 @@ def calculate_relative_strength(hist, hs300_df):
         return 0.0, 0
     rs = stock_ret / index_ret
     score = 15 if rs > 1.2 else 10 if rs > 1.1 else 5 if rs > 1.0 else 0 if rs > 0.9 else -5
-    return round(rs, 3), score
+    return round(float(rs), 3), score
+
+
+def calculate_rsi(hist, period=14):
+    if len(hist) < period + 2:
+        return 50.0
+    delta = hist['close'].diff()
+    gain = delta.clip(lower=0).rolling(period).mean()
+    loss = (-delta.clip(upper=0)).rolling(period).mean()
+    rs = gain / (loss + EPSILON)
+    rsi = 100 - (100 / (1 + rs))
+    val = rsi.iloc[-1]
+    if pd.isna(val):
+        return 50.0
+    return round(float(val), 2)
+
+
+def calculate_macd_hist_series(hist):
+    if len(hist) < 35:
+        return None
+    ema12 = hist['close'].ewm(span=12, adjust=False).mean()
+    ema26 = hist['close'].ewm(span=26, adjust=False).mean()
+    dif = ema12 - ema26
+    dea = dif.ewm(span=9, adjust=False).mean()
+    return dif - dea
+
+
+def signal_breakout_20d_volume(hist, vol_mult=1.5):
+    """20日新高 + 放量"""
+    if len(hist) < 25:
+        return '否'
+    high_20 = hist['high'].iloc[-21:-1].max()
+    last = hist.iloc[-1]
+    vol_ma20 = hist['volume'].iloc[-21:-1].mean()
+    is_new_high = (last['close'] >= high_20 * 0.998) or (last['high'] >= high_20)
+    is_vol = last['volume'] >= vol_ma20 * vol_mult if vol_ma20 > EPSILON else False
+    return '是' if (is_new_high and is_vol) else '否'
+
+
+def signal_oversold_rebound(hist):
+    """RSI超卖区 + MACD绿柱收缩"""
+    if len(hist) < 40:
+        return '否'
+    rsi = calculate_rsi(hist, 14)
+    macd_hist = calculate_macd_hist_series(hist)
+    if macd_hist is None:
+        return '否'
+    bars = macd_hist.tail(6)
+    shrink_days = 0
+    for i in range(1, len(bars)):
+        if bars.iloc[i] < 0 and bars.iloc[i - 1] < 0:
+            if abs(float(bars.iloc[i])) < abs(float(bars.iloc[i - 1])) * 0.98:
+                shrink_days += 1
+    rsi_ok = 25 <= rsi <= 42
+    macd_ok = shrink_days >= 3 and float(bars.iloc[-1]) < 0
+    return '是' if (rsi_ok and macd_ok) else '否'
+
+
+def calculate_max_drawdown(hist, window=60):
+    """近N日最大回撤%，负值"""
+    if len(hist) < 10:
+        return 0.0
+    s = hist['close'].tail(window)
+    peak = s.cummax()
+    dd = (s - peak) / (peak + EPSILON)
+    return round(float(dd.min() * 100), 2)
+
+
+def calculate_volatility(hist, window=20):
+    """近N日年化波动%（日收益std * sqrt(242)）"""
+    if len(hist) < window + 1:
+        return 0.0
+    ret = hist['close'].pct_change().tail(window)
+    vol = float(ret.std() * (242 ** 0.5) * 100)
+    if pd.isna(vol):
+        return 0.0
+    return round(vol, 2)
+
 
 def calculate_liquidity_score(hist):
     if 'turnover_rate' not in hist.columns or len(hist) < 20:
@@ -796,7 +883,11 @@ if __name__ == "__main__":
             today = fetch_today_quote(code, spot_df, spot_lookup)
             streak3 = calc_streak_and_3d(hist)
             avg_cost = calculate_vwap_cost(hist)
-            profit_pct = calculate_profit_pct(today['今日收盘价'], avg_cost)
+            last_close = float(hist['close'].iloc[-1])
+            # spot 无数据时回退历史收盘，避免获利%变成 -100
+            spot_px = today.get('今日收盘价', 0) or 0
+            current_price = float(spot_px) if float(spot_px) > EPSILON else last_close
+            profit_pct = calculate_profit_pct(current_price, avg_cost)
             short_sup, short_res, ultra_sup, ultra_res = calculate_support_resistance(hist)
             macd_cross = check_macd_golden_cross(hist)
             tech_patterns = detect_technical_patterns(df_pre)
@@ -804,10 +895,32 @@ if __name__ == "__main__":
             rs_value, rs_score = calculate_relative_strength(hist, hs300)
             avg_turnover, liquidity_penalty = calculate_liquidity_score(hist)
             stop_loss = get_risk_control(hist, code)
-            last_close = hist['close'].iloc[-1]
-            stop_distance_pct = round((last_close - stop_loss) / (last_close + EPSILON) * 100, 2) if stop_loss > 0 else 0
+            stop_distance_pct = round((current_price - stop_loss) / (current_price + EPSILON) * 100, 2) if stop_loss > 0 else 0
+            rsi_val = calculate_rsi(hist)
+            sig_break = signal_breakout_20d_volume(hist)
+            sig_oversold = signal_oversold_rebound(hist)
+            max_dd = calculate_max_drawdown(hist, 60)
+            vol_ann = calculate_volatility(hist, 20)
+            signal_tags = []
+            if sig_break == '是':
+                signal_tags.append('20日突破放量')
+            if sig_oversold == '是':
+                signal_tags.append('超跌蓄势')
+            if str(macd_cross).startswith('是'):
+                signal_tags.append('MACD金叉')
+            signal_tag = '|'.join(signal_tags) if signal_tags else ''
+            risk_flags = []
+            if max_dd <= -20:
+                risk_flags.append('深回撤')
+            if vol_ann >= 60:
+                risk_flags.append('高波动')
+            if stop_distance_pct >= 18:
+                risk_flags.append('止损过宽')
+            if avg_turnover < 0.8:
+                risk_flags.append('低流动')
+            risk_tag = '|'.join(risk_flags) if risk_flags else '正常'
             row = {
-                '股票代码': code, '股票名称': name, '最新价': round(last_close, 2),
+                '股票代码': code, '股票名称': name, '最新价': round(current_price, 2),
                 '昨收': today['昨收'], '今开': today['今开'],
                 '今日最高': today['今日最高'], '今日最低': today['今日最低'],
                 '今日均价': today['今日均价'],
@@ -829,7 +942,14 @@ if __name__ == "__main__":
                 'ATR 止损位': stop_loss, '止损距离%': stop_distance_pct,
                 'OBV 趋势': calculate_obv_trend(hist), '相对强度 RS': rs_value,
                 'RS 得分': rs_score, '20 日均换手率%': avg_turnover,
-                '流动性扣分': liquidity_penalty, '市场类型': detect_market_type(code)
+                '流动性扣分': liquidity_penalty, '市场类型': detect_market_type(code),
+                'RSI(14)': rsi_val,
+                '60日最大回撤%': max_dd,
+                '20日年化波动%': vol_ann,
+                '信号_20日突破放量': sig_break,
+                '信号_超跌蓄势': sig_oversold,
+                '信号标签': signal_tag,
+                '风险标签': risk_tag,
             }
             results.append(row)
             if len(hist) >= 20:
@@ -873,6 +993,17 @@ if __name__ == "__main__":
         with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
             df_final.to_excel(writer, sheet_name='股票扫描结果', index=False)
             df_volume.to_excel(writer, sheet_name='今日放量Top20', index=False)
+            # 硬信号预警
+            if '信号_20日突破放量' in df_final.columns:
+                sig_mask = (df_final['信号_20日突破放量'] == '是') | (df_final['信号_超跌蓄势'] == '是')
+                df_signal = df_final.loc[sig_mask].copy()
+                sig_cols = [c for c in ['股票代码', '股票名称', '最新价', '总分', '评级', '信号标签', '风险标签',
+                                        '量比', 'RSI(14)', '相对强度 RS', '60日最大回撤%', '20日年化波动%']
+                            if c in df_signal.columns]
+                if not df_signal.empty:
+                    df_signal[sig_cols].to_excel(writer, sheet_name='信号预警', index=False)
+                else:
+                    pd.DataFrame(columns=sig_cols).to_excel(writer, sheet_name='信号预警', index=False)
             get_definition_sheet().to_excel(writer, sheet_name='指标完全解读手册', index=False)
             df_final['市场类型'].value_counts().to_frame('数量').to_excel(writer, sheet_name='市场统计')
             df_final['评级'].value_counts().to_frame('数量').to_excel(writer, sheet_name='评级分布')
