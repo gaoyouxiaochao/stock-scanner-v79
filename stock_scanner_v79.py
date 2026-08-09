@@ -235,6 +235,7 @@ def clean_numeric(df):
 
 def fetch_hs300_data(end_date_str):
     """沪深300优先，失败则 510300 ETF，再失败上证指数 000001，避免 RS 全 0。"""
+    global BENCHMARK_NAME
     start_date = (datetime.now() - timedelta(days=400)).strftime("%Y%m%d")
     end_str = end_date_str.replace('-', '')
     rename_map = {'日期': 'date', '开盘': 'open', '最高': 'high', '最低': 'low', '收盘': 'close', '成交量': 'volume'}
@@ -244,7 +245,6 @@ def fetch_hs300_data(end_date_str):
         df = ak.index_zh_a_hist(symbol="000300", period="daily")
         if df is not None and not df.empty:
             df = df.rename(columns=rename_map)
-            global BENCHMARK_NAME
             BENCHMARK_NAME = "沪深300"
             print("  ✅ 基准指数: 沪深300 (000300)")
             return clean_numeric(df)
@@ -255,7 +255,6 @@ def fetch_hs300_data(end_date_str):
         df = ak.stock_zh_a_hist(symbol="510300", period="daily", start_date=start_date, end_date=end_str, adjust="qfq")
         if df is not None and not df.empty:
             df = df.rename(columns=rename_map)
-            global BENCHMARK_NAME
             BENCHMARK_NAME = "沪深300ETF"
             print("  ✅ 基准指数降级: 沪深300ETF (510300)")
             return clean_numeric(df)
@@ -266,13 +265,13 @@ def fetch_hs300_data(end_date_str):
         df = ak.index_zh_a_hist(symbol="000001", period="daily")
         if df is not None and not df.empty:
             df = df.rename(columns=rename_map)
-            global BENCHMARK_NAME
             BENCHMARK_NAME = "上证指数"
             print("  ⚠️ 基准指数降级: 上证指数 (000001)")
             return clean_numeric(df)
     except Exception:
         pass
     print("  ❌ 基准指数全部失败，RS 将为 0")
+    BENCHMARK_NAME = "未知"
     return None
 
 def fetch_hist_with_cache(code, end_date_str):
