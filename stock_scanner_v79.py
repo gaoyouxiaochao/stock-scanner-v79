@@ -240,20 +240,76 @@ def calc_stock_mas(hist):
             out[key] = round(float(c.tail(n).mean()), 3)
     return out
 
+def _normalize_index_df(df):
+    """统一指数列名并清洗"""
+    if df is None or getattr(df, 'empty', True):
+        return None
+    rename = {
+        '日期': 'date', 'date': 'date',
+        '开盘': 'open', 'open': 'open',
+        '最高': 'high', 'high': 'high',
+        '最低': 'low', 'low': 'low',
+        '收盘': 'close', 'close': 'close',
+        '成交量': 'volume', 'volume': 'volume',
+    }
+    cols = {}
+    for c in df.columns:
+        cs = str(c).strip()
+        if cs in rename:
+            cols[c] = rename[cs]
+    df = df.rename(columns=cols)
+    df = clean_numeric(df)
+    if df is None or df.empty or 'close' not in df.columns:
+        return None
+    if len(df) > 400:
+        df = df.tail(400).reset_index(drop=True)
+    return df
+
+
 def fetch_index_hist(symbol, end_date_str, name=''):
+    """
+    拉取指数日K，多源回退：
+    1) 东财 index_zh_a_hist（必须带 start/end）
+    2) 新浪 stock_zh_index_daily（sh000001 / sz399001）
+    """
+    label = name or symbol
+    start = (datetime.now() - timedelta(days=500)).strftime("%Y%m%d")
+    end = (end_date_str or datetime.now().strftime("%Y-%m-%d")).replace('-', '')
+    pure = re.sub(r'\D', '', str(symbol)).zfill(6)
+
+    # 1) 东财
     try:
-        df = ak.index_zh_a_hist(symbol=str(symbol), period="daily")
-        if df is not None and not df.empty:
-            df = df.rename(columns={
-                '日期': 'date', '开盘': 'open', '最高': 'high',
-                '最低': 'low', '收盘': 'close', '成交量': 'volume'
-            })
-            df = clean_numeric(df)
-            if df is not None and len(df) > 400:
-                df = df.tail(400).reset_index(drop=True)
+        df = ak.index_zh_a_hist(symbol=pure, period="daily", start_date=start, end_date=end)
+        df = _normalize_index_df(df)
+        if df is not None and len(df) >= 30:
+            print(f"  ✅ 指数 {label}({pure}) 东财成功 {len(df)} 条")
             return df
     except Exception as e:
-        print(f"  ⚠️ 指数 {name or symbol} 获取失败: {type(e).__name__}: {str(e)[:80]}")
+        print(f"  ⚠️ 指数 {label} 东财失败: {type(e).__name__}: {str(e)[:60]}")
+
+    # 2) 新浪：上证 sh000001 / 深证 sz399001 / 沪深300 sh000300
+    sina_map = {
+        '000001': 'sh000001',
+        '399001': 'sz399001',
+        '000300': 'sh000300',
+        '399006': 'sz399006',
+    }
+    sina_sym = sina_map.get(pure)
+    if not sina_sym:
+        if pure.startswith('399'):
+            sina_sym = f'sz{pure}'
+        else:
+            sina_sym = f'sh{pure}'
+    try:
+        df = ak.stock_zh_index_daily(symbol=sina_sym)
+        df = _normalize_index_df(df)
+        if df is not None and len(df) >= 30:
+            print(f"  ✅ 指数 {label}({sina_sym}) 新浪成功 {len(df)} 条")
+            return df
+    except Exception as e:
+        print(f"  ⚠️ 指数 {label} 新浪失败: {type(e).__name__}: {str(e)[:60]}")
+
+    print(f"  ❌ 指数 {label} 全部来源失败")
     return None
 
 def build_index_snapshot(hist, prefix):
@@ -270,7 +326,7 @@ def build_index_snapshot(hist, prefix):
     out[f'{prefix}K线形态'] = ''
     out[f'{prefix}大阳次数'] = 0
 
-    if hist is None or len(hist) < 30:
+    if hist is None or len(hist) < 20:
         return out
 
     c = hist['close']
@@ -312,38 +368,53 @@ def build_index_snapshot(hist, prefix):
     return out
 
 def fetch_hs300_data(end_date_str):
+    """沪深300多源：东财指数 → 新浪指数 → 510300 ETF → 上证"""
     global BENCHMARK_NAME
-    start_date = (datetime.now() - timedelta(days=400)).strftime("%Y%m%d")
+    start_date = (datetime.now() - timedelta(days=500)).strftime("%Y%m%d")
     end_str = end_date_str.replace('-', '')
-    rename_map = {'日期': 'date', '开盘': 'open', '最高': 'high', '最低': 'low', '收盘': 'close', '成交量': 'volume'}
 
+    # 1) 东财 000300
     try:
-        df = ak.index_zh_a_hist(symbol="000300", period="daily")
-        if df is not None and not df.empty:
-            df = df.rename(columns=rename_map)
+        df = ak.index_zh_a_hist(symbol="000300", period="daily", start_date=start_date, end_date=end_str)
+        df = _normalize_index_df(df)
+        if df is not None and len(df) >= 60:
             BENCHMARK_NAME = "沪深300"
-            print("  ✅ 基准指数: 沪深300 (000300)")
-            return clean_numeric(df)
-    except Exception:
-        pass
+            print("  ✅ 基准指数: 沪深300 (000300 东财)")
+            return df
+    except Exception as e:
+        print(f"  ⚠️ HS300 东财失败: {type(e).__name__}: {str(e)[:60]}")
+
+    # 2) 新浪 sh000300
+    try:
+        df = ak.stock_zh_index_daily(symbol="sh000300")
+        df = _normalize_index_df(df)
+        if df is not None and len(df) >= 60:
+            BENCHMARK_NAME = "沪深300"
+            print("  ✅ 基准指数: 沪深300 (sh000300 新浪)")
+            return df
+    except Exception as e:
+        print(f"  ⚠️ HS300 新浪失败: {type(e).__name__}: {str(e)[:60]}")
+
+    # 3) ETF 510300
     try:
         df = ak.stock_zh_a_hist(symbol="510300", period="daily", start_date=start_date, end_date=end_str, adjust="qfq")
         if df is not None and not df.empty:
-            df = df.rename(columns=rename_map)
-            BENCHMARK_NAME = "沪深300ETF"
-            print("  ✅ 基准指数降级: 沪深300ETF (510300)")
-            return clean_numeric(df)
-    except Exception:
-        pass
-    try:
-        df = ak.index_zh_a_hist(symbol="000001", period="daily")
-        if df is not None and not df.empty:
-            df = df.rename(columns=rename_map)
-            BENCHMARK_NAME = "上证指数"
-            print("  ⚠️ 基准指数降级: 上证指数 (000001)")
-            return clean_numeric(df)
-    except Exception:
-        pass
+            df = df.rename(columns={'日期': 'date', '开盘': 'open', '最高': 'high', '最低': 'low', '收盘': 'close', '成交量': 'volume'})
+            df = clean_numeric(df)
+            if df is not None and len(df) >= 60:
+                BENCHMARK_NAME = "沪深300ETF"
+                print("  ✅ 基准指数降级: 沪深300ETF (510300)")
+                return df
+    except Exception as e:
+        print(f"  ⚠️ 510300 失败: {type(e).__name__}: {str(e)[:60]}")
+
+    # 4) 上证
+    df = fetch_index_hist("000001", end_date_str, "上证指数")
+    if df is not None and len(df) >= 60:
+        BENCHMARK_NAME = "上证指数"
+        print("  ⚠️ 基准指数降级: 上证指数")
+        return df
+
     print("  ❌ 基准指数全部失败，RS 将为 0")
     BENCHMARK_NAME = "未知"
     return None
