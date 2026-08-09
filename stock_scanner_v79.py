@@ -5,6 +5,7 @@
 - 修复：涨幅相对昨收、20日突破排除当日、交易日回退、异常捕获
 - 修复：RS除零、连续涨停计数、shift首行NaN、OBV窗口、止损语义
 - 增强：RS merge对齐、突破/超跌信号、回撤波动、获利回退、信号预警Sheet
+- P0：大盘MA60环境开关、突破防诱多、KDJ拐头超跌、BIAS不追高、策略命中列
 - 32只/424只均可稳定运行 """
 
 import pandas as pd
@@ -716,19 +717,35 @@ def calculate_macd_hist_series(hist):
 
 
 def signal_breakout_20d_volume(hist, vol_mult=1.5):
-    """20日新高 + 放量"""
+    """20日新高 + 放量 + 阳线防诱多（收盘>开盘 且 收盘>昨收）"""
     if len(hist) < 25:
         return '否'
     high_20 = hist['high'].iloc[-21:-1].max()
     last = hist.iloc[-1]
+    prev = hist.iloc[-2]
     vol_ma20 = hist['volume'].iloc[-21:-1].mean()
-    is_new_high = (last['close'] >= high_20 * 0.998) or (last['high'] >= high_20)
-    is_vol = last['volume'] >= vol_ma20 * vol_mult if vol_ma20 > EPSILON else False
-    return '是' if (is_new_high and is_vol) else '否'
+    is_new_high = (float(last['close']) >= float(high_20) * 0.998) or (float(last['high']) >= float(high_20))
+    is_vol = float(last['volume']) >= float(vol_ma20) * vol_mult if vol_ma20 > EPSILON else False
+    is_yang = float(last['close']) > float(last['open'])
+    is_up = float(last['close']) > float(prev['close'])
+    return '是' if (is_new_high and is_vol and is_yang and is_up) else '否'
+
+
+def calculate_kdj(hist, n=9, m1=3, m2=3):
+    """返回最新 K, D, J；数据不足返回 (50,50,50)"""
+    if len(hist) < n + 2:
+        return 50.0, 50.0, 50.0
+    low_n = hist['low'].rolling(n).min()
+    high_n = hist['high'].rolling(n).max()
+    rsv = (hist['close'] - low_n) / (high_n - low_n + EPSILON) * 100
+    k = rsv.ewm(alpha=1 / m1, adjust=False).mean()
+    d = k.ewm(alpha=1 / m2, adjust=False).mean()
+    j = 3 * k - 2 * d
+    return round(float(k.iloc[-1]), 2), round(float(d.iloc[-1]), 2), round(float(j.iloc[-1]), 2)
 
 
 def signal_oversold_rebound(hist):
-    """RSI超卖区 + MACD绿柱收缩"""
+    """RSI超卖区 + MACD绿柱收缩 + KDJ低位拐头"""
     if len(hist) < 40:
         return '否'
     rsi = calculate_rsi(hist, 14)
@@ -743,7 +760,50 @@ def signal_oversold_rebound(hist):
                 shrink_days += 1
     rsi_ok = 25 <= rsi <= 42
     macd_ok = shrink_days >= 3 and float(bars.iloc[-1]) < 0
-    return '是' if (rsi_ok and macd_ok) else '否'
+    # KDJ: J 曾在低位(<15)且拐头向上
+    kdj_ok = False
+    if len(hist) >= 15:
+        low_n = hist['low'].rolling(9).min()
+        high_n = hist['high'].rolling(9).max()
+        rsv = (hist['close'] - low_n) / (high_n - low_n + EPSILON) * 100
+        k = rsv.ewm(alpha=1 / 3, adjust=False).mean()
+        d = k.ewm(alpha=1 / 3, adjust=False).mean()
+        j = 3 * k - 2 * d
+        j1, j0 = float(j.iloc[-1]), float(j.iloc[-2])
+        j_min_recent = float(j.tail(5).min())
+        kdj_ok = (j_min_recent < 15) and (j1 > j0)
+    return '是' if (rsi_ok and macd_ok and kdj_ok) else '否'
+
+
+def calculate_bias(hist, period=20):
+    """BIAS = (收盘 - MA) / MA * 100"""
+    if len(hist) < period + 1:
+        return 0.0
+    ma = hist['close'].rolling(period).mean().iloc[-1]
+    close = float(hist['close'].iloc[-1])
+    if ma is None or pd.isna(ma) or abs(float(ma)) < EPSILON:
+        return 0.0
+    return round((close / float(ma) - 1.0) * 100, 2)
+
+
+def detect_market_regime(hs300_df, ma_period=60):
+    """沪深300 vs MA60：强势 / 弱势 / 未知"""
+    if hs300_df is None or len(hs300_df) < ma_period + 2:
+        return '未知', 0.0, 0.0
+    df = hs300_df.copy()
+    df['date'] = pd.to_datetime(df['date']).dt.normalize()
+    df = df.sort_values('date').drop_duplicates('date', keep='last')
+    close = df['close'].astype(float)
+    ma = close.rolling(ma_period).mean()
+    last_c = float(close.iloc[-1])
+    last_ma = float(ma.iloc[-1]) if not pd.isna(ma.iloc[-1]) else 0.0
+    if last_ma <= EPSILON:
+        return '未知', last_c, last_ma
+    if last_c > last_ma * 1.002:
+        return '强势', last_c, round(last_ma, 2)
+    if last_c < last_ma * 0.998:
+        return '弱势', last_c, round(last_ma, 2)
+    return '中性', last_c, round(last_ma, 2)
 
 
 def calculate_max_drawdown(hist, window=60):
@@ -839,6 +899,8 @@ if __name__ == "__main__":
     hs300 = fetch_hs300_data(END_DATE_STR)
     spot_df = get_all_spot_data()
     spot_lookup = build_spot_lookup(spot_df)
+    market_regime, hs300_last, hs300_ma60 = detect_market_regime(hs300, 60)
+    print(f"🌡 大盘环境（沪深300 vs MA60）：{market_regime} | 点位≈{hs300_last:.2f} MA60≈{hs300_ma60}")
     input_path = None
     for p in POSSIBLE_INPUTS:
         if p.exists():
@@ -897,10 +959,12 @@ if __name__ == "__main__":
             stop_loss = get_risk_control(hist, code)
             stop_distance_pct = round((current_price - stop_loss) / (current_price + EPSILON) * 100, 2) if stop_loss > 0 else 0
             rsi_val = calculate_rsi(hist)
+            k_val, d_val, j_val = calculate_kdj(hist)
             sig_break = signal_breakout_20d_volume(hist)
             sig_oversold = signal_oversold_rebound(hist)
             max_dd = calculate_max_drawdown(hist, 60)
             vol_ann = calculate_volatility(hist, 20)
+            bias20 = calculate_bias(hist, 20)
             signal_tags = []
             if sig_break == '是':
                 signal_tags.append('20日突破放量')
@@ -918,9 +982,23 @@ if __name__ == "__main__":
                 risk_flags.append('止损过宽')
             if avg_turnover < 0.8:
                 risk_flags.append('低流动')
+            if bias20 > 5.0:
+                risk_flags.append('乖离偏高')
+            if market_regime == '弱势':
+                risk_flags.append('弱市')
             risk_tag = '|'.join(risk_flags) if risk_flags else '正常'
+            # 策略命中标签（不改总分公式，仅展示）
+            strategy_hits = []
+            if sig_break == '是':
+                strategy_hits.append('趋势突破')
+            if sig_oversold == '是':
+                strategy_hits.append('超跌蓄势')
+            if today.get('量比', 0) and float(today.get('量比', 0) or 0) >= 1.5 and float(today.get('今日涨跌幅', 0) or 0) > 0:
+                strategy_hits.append('放量强势')
+            strategy_tag = '|'.join(strategy_hits) if strategy_hits else ''
             row = {
                 '股票代码': code, '股票名称': name, '最新价': round(current_price, 2),
+                '大盘环境': market_regime,
                 '昨收': today['昨收'], '今开': today['今开'],
                 '今日最高': today['今日最高'], '今日最低': today['今日最低'],
                 '今日均价': today['今日均价'],
@@ -944,11 +1022,14 @@ if __name__ == "__main__":
                 'RS 得分': rs_score, '20 日均换手率%': avg_turnover,
                 '流动性扣分': liquidity_penalty, '市场类型': detect_market_type(code),
                 'RSI(14)': rsi_val,
+                'KDJ_K': k_val, 'KDJ_D': d_val, 'KDJ_J': j_val,
+                'BIAS20%': bias20,
                 '60日最大回撤%': max_dd,
                 '20日年化波动%': vol_ann,
                 '信号_20日突破放量': sig_break,
                 '信号_超跌蓄势': sig_oversold,
                 '信号标签': signal_tag,
+                '策略命中': strategy_tag,
                 '风险标签': risk_tag,
             }
             results.append(row)
@@ -975,6 +1056,13 @@ if __name__ == "__main__":
     scores = df.apply(calculate_smart_scores, axis=1)
     scores.columns = ['启动得分', '筹码得分', '趋势得分', '共振得分', '资金得分', '风控得分', 'RS 得分', '流动性扣分', '总分', '评级', '操作建议']
     df_final = pd.concat([df, scores], axis=1)
+    # 大盘弱势：不改总分，仅在操作建议上提示（开关）
+    if market_regime == '弱势' and '操作建议' in df_final.columns:
+        df_final['操作建议'] = df_final['操作建议'].astype(str) + ' | 弱市慎加仓'
+    if '风险标签' in df_final.columns and 'BIAS20%' in df_final.columns:
+        # 乖离偏高时提示不追高
+        mask_bias = df_final['BIAS20%'] > 5.0
+        df_final.loc[mask_bias, '操作建议'] = df_final.loc[mask_bias, '操作建议'].astype(str) + ' | 不追高'
     rating_order = {'S 级 (极强)': 0, 'A 级 (强势)': 1, 'B 级 (观察)': 2, 'C 级 (弱势)': 3, 'D 级 (风险)': 4}
     df_final['评级排序'] = df_final['评级'].map(rating_order)
     df_final = df_final.sort_values(['评级排序', '总分'], ascending=[True, False]).drop('评级排序', axis=1)
@@ -997,8 +1085,9 @@ if __name__ == "__main__":
             if '信号_20日突破放量' in df_final.columns:
                 sig_mask = (df_final['信号_20日突破放量'] == '是') | (df_final['信号_超跌蓄势'] == '是')
                 df_signal = df_final.loc[sig_mask].copy()
-                sig_cols = [c for c in ['股票代码', '股票名称', '最新价', '总分', '评级', '信号标签', '风险标签',
-                                        '量比', 'RSI(14)', '相对强度 RS', '60日最大回撤%', '20日年化波动%']
+                sig_cols = [c for c in ['股票代码', '股票名称', '最新价', '总分', '评级', '大盘环境', '策略命中',
+                                        '信号标签', '风险标签', '量比', 'RSI(14)', 'KDJ_J', 'BIAS20%',
+                                        '相对强度 RS', '60日最大回撤%', '20日年化波动%']
                             if c in df_signal.columns]
                 if not df_signal.empty:
                     df_signal[sig_cols].to_excel(writer, sheet_name='信号预警', index=False)
