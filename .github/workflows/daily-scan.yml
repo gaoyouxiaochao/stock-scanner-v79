@@ -37,25 +37,33 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           mkdir -p results
 
-          FILE=$(ls -t results/*.xlsx 2>/dev/null | head -n 1 || true)
-          if [ -z "$FILE" ]; then
+          # 优先使用本次生成的固定文件名
+          if [ -f results/latest.xlsx ]; then
+            FILE="results/latest.xlsx"
+          else
+            FILE=$(ls -t results/*.xlsx 2>/dev/null | head -n 1 || true)
+          fi
+
+          if [ -z "$FILE" ] || [ ! -f "$FILE" ]; then
             echo "没有生成 Excel，跳过推送"
             exit 0
           fi
 
+          echo "将提交文件: $FILE"
+
           # results 可能被 gitignore，强制加入
-          git add -f results/*.xlsx || git add -f "$FILE" || true
+          git add -f results/latest.xlsx 2>/dev/null || true
+          git add -f results/*.xlsx 2>/dev/null || true
+
           if ! git diff --staged --quiet; then
-            git commit -m "auto stock scan $(date '+%Y-%m-%d %H:%M')"
+            git commit -m "auto stock scan $(date -u '+%Y-%m-%d %H:%M') UTC"
             git push
           else
-            echo "无新文件变更，仍尝试推送下载链接"
+            echo "无文件变更（可能 latest 内容相同），仍推送下载链接"
           fi
 
-          FILENAME=$(basename "$FILE")
-          # 中文文件名 URL 编码，避免 raw 链接 404
-          ENC_NAME=$(python3 -c "import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))" "$FILENAME")
-          RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/results/${ENC_NAME}"
+          # 固定英文路径，无中文、无历史时间戳混淆
+          RAW_URL="https://raw.githubusercontent.com/${{ github.repository }}/main/results/latest.xlsx"
 
           echo "Download URL: $RAW_URL"
 
@@ -64,9 +72,9 @@ jobs:
             exit 0
           fi
 
-          # 微信只推一条 Download 直链
-          curl -s -X POST "http://www.pushplus.plus/send" \
+          # 微信只推这一条 Download 链接
+          curl -sS -X POST "http://www.pushplus.plus/send" \
             -H "Content-Type: application/json" \
-            -d "{\"token\":\"${PUSHPLUS_TOKEN}\",\"title\":\"A股扫描结果\",\"content\":\"${RAW_URL}\",\"template\":\"txt\"}"
+            -d "{\"token\":\"${PUSHPLUS_TOKEN}\",\"title\":\"A-share scan Download\",\"content\":\"${RAW_URL}\",\"template\":\"txt\"}"
 
           echo "PushPlus 已发送"
