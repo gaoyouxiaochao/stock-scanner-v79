@@ -24,6 +24,7 @@ import traceback
 import random
 import threading
 import pickle
+import shutil
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 
@@ -1925,8 +1926,16 @@ if __name__ == "__main__":
             except Exception as style_e:
                 print(f"  ⚠️ Excel美化部分失败（数据已正常写出）: {style_e}")
 
+        # 固定英文名，供 GitHub raw / 微信 Download（避免中文编码与旧文件误链）
+        latest_path = OUTPUT_DIR / "latest.xlsx"
+        try:
+            shutil.copy2(output_path, latest_path)
+            print(f"📌 同步固定下载文件：{latest_path}")
+        except Exception as ce:
+            print(f"⚠️ 复制 latest.xlsx 失败: {ce}")
+
         print(f"📊 扫描报告成功输出至：{output_path}")
-        print(" 📌 输出包含Sheet：一页纸决策 | 股票扫描结果 | 今日放量Top20 | 信号预警 | 完全解读手册")
+        print(" 📌 输出包含Sheet：一页纸决策 | 大盘画像 | 股票扫描结果 | 今日放量Top20 | 信号预警")
         cols5 = ['股票名称', '股票代码', '评级', '总分']
         for c in ['池内总分分位%', '相对强度 RS', '信号标签', 'K 线形态']:
             if c in df_final.columns:
