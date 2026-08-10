@@ -277,6 +277,86 @@ def classify_stop_distance_state(dist_pct):
     return '剧烈波动/深回撤中'
 
 
+def classify_kdj_state(k, d, j):
+    """基于当前 K/D/J 值判断 KDJ 市场状态"""
+    try:
+        k, d, j = float(k), float(d), float(j)
+    except Exception:
+        return '未知'
+    if j > 100 and k > 80 and d > 80:
+        return '极度超买'
+    if j < 0 and k < 20 and d < 20:
+        return '极度超卖'
+    if k > 80 and d > 80:
+        return '高位钝化'
+    if k < 20 and d < 20:
+        return '低位钝化'
+    if k > d:
+        if d < 30:
+            return '低位金叉'
+        if d > 70:
+            return '偏多(高位)'
+        return '偏多'
+    if k < d:
+        if d > 70:
+            return '高位死叉'
+        if d < 30:
+            return '偏空(低位)'
+        return '偏空'
+    return '中性'
+
+
+def classify_rsi_state(rsi):
+    """RSI(14) → 市场状态"""
+    try:
+        v = float(rsi)
+    except Exception:
+        return '未知'
+    if v > 80:
+        return '极度超买'
+    if v >= 70:
+        return '超买区'
+    if v > 50:
+        return '偏强区'
+    if v == 50:
+        return '中轴线'
+    if v >= 30:
+        return '偏弱区'
+    if v >= 20:
+        return '超卖区'
+    return '极度超卖'
+
+
+def calculate_multi_period_rs(hist, hs300_df):
+    """多周期 RS (5/10/20/60) + 综合状态判断"""
+    out = {'RS_5': 0.0, 'RS_10': 0.0, 'RS_20': 0.0, 'RS_60': 0.0, 'RS状态': '未知'}
+    if hist is None or hs300_df is None:
+        return out
+    for window, key in [(5, 'RS_5'), (10, 'RS_10'), (20, 'RS_20'), (60, 'RS_60')]:
+        rs_val, _ = calculate_relative_strength(hist, hs300_df, window)
+        out[key] = rs_val
+    rs_vals = [out['RS_5'], out['RS_10'], out['RS_20'], out['RS_60']]
+    pos = sum(1 for v in rs_vals if v > 1.0)
+    neg = sum(1 for v in rs_vals if v < 1.0)
+    # 检查是否递增/递减（忽略无效值）
+    valid = [v for v in rs_vals if v > 0]
+    inc = len(valid) >= 2 and all(valid[i] < valid[i+1] for i in range(len(valid)-1))
+    dec = len(valid) >= 2 and all(valid[i] > valid[i+1] for i in range(len(valid)-1))
+    if pos == 4 and inc:
+        out['RS状态'] = '全面跑赢，强势确认'
+    elif pos >= 3:
+        out['RS状态'] = '总体偏强'
+    elif pos >= 1 and neg >= 1:
+        out['RS状态'] = '强弱不明，震荡'
+    elif neg >= 3:
+        out['RS状态'] = '总体偏弱'
+    elif neg == 4 and dec:
+        out['RS状态'] = '全面跑输，弱势'
+    else:
+        out['RS状态'] = '中性'
+    return out
+
+
 def calc_bias_bundle(hist, close_price):
     """
     多周期乖离率 + 市场状态
@@ -1518,12 +1598,15 @@ if __name__ == "__main__":
             tech_patterns = detect_technical_patterns(df_pre)
             kline_patterns = detect_kline_patterns(hist)
             rs_value, rs_score = calculate_relative_strength(hist, hs300)
+            multi_period_rs = calculate_multi_period_rs(hist, hs300)
             avg_turnover, liquidity_penalty = calculate_liquidity_score(hist)
             stop_loss = get_risk_control(hist, code)
             stop_distance_pct = round((current_price - stop_loss) / (current_price + EPSILON) * 100, 2) if stop_loss > 0 else 0
             stop_state = classify_stop_distance_state(stop_distance_pct)
             rsi_val = calculate_rsi(hist)
+            rsi_state = classify_rsi_state(rsi_val)
             k_val, d_val, j_val = calculate_kdj(hist)
+            kdj_state = classify_kdj_state(k_val, d_val, j_val)
             sig_break = signal_breakout_20d_volume(hist)
             sig_oversold = signal_oversold_rebound(hist)
             max_dd = calculate_max_drawdown(hist, 60)
@@ -1589,11 +1672,14 @@ if __name__ == "__main__":
                 'ATR 止损位': stop_loss, '止损距离%': stop_distance_pct,
                 '止损距离状态': stop_state,
                 'OBV 趋势': calculate_obv_trend(hist), '相对强度 RS': rs_value,
+                'RS_5': multi_period_rs['RS_5'], 'RS_10': multi_period_rs['RS_10'],
+                'RS_20': multi_period_rs['RS_20'], 'RS_60': multi_period_rs['RS_60'],
+                'RS状态': multi_period_rs['RS状态'],
                 'RS 得分': rs_score, '20 日均换手率%': avg_turnover,
                 '流动性扣分': liquidity_penalty, '市场类型': detect_market_type(code),
                 '基准指数': BENCHMARK_NAME,
-                'RSI(14)': rsi_val,
-                'KDJ_K': k_val, 'KDJ_D': d_val, 'KDJ_J': j_val,
+                'RSI(14)': rsi_val, 'RSI状态': rsi_state,
+                'KDJ_K': k_val, 'KDJ_D': d_val, 'KDJ_J': j_val, 'KDJ状态': kdj_state,
                 '60日最大回撤%': max_dd,
                 '20日年化波动%': vol_ann,
                 '信号_20日突破放量': sig_break,
@@ -1842,6 +1928,10 @@ if __name__ == "__main__":
                         ('总分', 15, 50, 85),
                         ('池内总分分位%', 0, 50, 100),
                         ('相对强度 RS', 0.7, 1.0, 1.3),
+                        ('RS_5', 0.7, 1.0, 1.3),
+                        ('RS_10', 0.7, 1.0, 1.3),
+                        ('RS_20', 0.7, 1.0, 1.3),
+                        ('RS_60', 0.7, 1.0, 1.3),
                         ('ADX 趋势强度', 15, 25, 40),
                     ]:
                         letter = col_letter_of(col_name)
@@ -1899,22 +1989,22 @@ if __name__ == "__main__":
                             elif any(k in val for k in ('弱势', '偏弱', '跌破')):
                                 ws.cell(row=r, column=cidx).fill = weak_fill
 
-                    overbought = ('极度超买', '超买偏强')
-                    oversold = ('极度超卖', '超卖偏弱')
-                    for col_name in ('ADX市场状态', '止损距离状态', 'BIAS5状态', 'BIAS10状态', 'BIAS20状态', 'BIAS60状态'):
+                    overbought = ('极度超买', '超买偏强', '超买区', '偏多(高位)')
+                    oversold = ('极度超卖', '超卖偏弱', '超卖区', '偏空(低位)')
+                    for col_name in ('ADX市场状态', '止损距离状态', 'BIAS5状态', 'BIAS10状态', 'BIAS20状态', 'BIAS60状态', 'KDJ状态', 'RSI状态', 'RS状态'):
                         cidx = col_idx_of(col_name)
                         if not cidx:
                             continue
                         for r in range(2, ws.max_row + 1):
                             val = str(ws.cell(row=r, column=cidx).value or '')
                             cell = ws.cell(row=r, column=cidx)
-                            if any(k in val for k in overbought) or val in ('超强趋势', '剧烈波动/深回撤中'):
+                            if any(k in val for k in overbought) or val in ('超强趋势', '剧烈波动/深回撤中', '高位钝化', '高位死叉', '全面跑输，弱势'):
                                 cell.fill = risk_fill
-                            elif any(k in val for k in oversold) or val in ('无趋势', '极低波动盘整'):
+                            elif any(k in val for k in oversold) or val in ('无趋势', '极低波动盘整', '低位钝化', '总体偏弱'):
                                 cell.fill = weak_fill
-                            elif val in ('强趋势', '极强趋势', '健康趋势行情', '中性区间'):
+                            elif val in ('强趋势', '极强趋势', '健康趋势行情', '中性区间', '偏多', '低位金叉', '偏强区', '总体偏强', '全面跑赢，强势确认'):
                                 cell.fill = ok_fill
-                            elif val in ('趋势形成中', '低波动平稳期'):
+                            elif val in ('趋势形成中', '低波动平稳期', '中性', '中轴线', '偏弱区', '偏空', '强弱不明，震荡', '偏空(低位)', '偏多(高位)'):
                                 cell.fill = warn_fill
 
                     for name_col in ('股票名称', '指数名称'):
