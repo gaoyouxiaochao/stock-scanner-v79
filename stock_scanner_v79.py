@@ -924,18 +924,18 @@ def fetch_today_quote(code, spot_df, spot_lookup=None):
         '今日涨跌幅': round(pct, 2),
         '今日开盘价': round(open_p, 2),
         '今日收盘价': round(close_p, 2),
-        '今日成交量': round(vol / 1e4, 4) if vol else 0.0,  # 手→万手
+        '今日成交量': round(vol / 1e4, 2) if vol else 0.0,  # 手→万手
         '昨收': round(pre_close, 2),
         '今开': round(open_p, 2),
         '今日最高': round(high_p, 2),
         '今日最低': round(low_p, 2),
         '今日振幅': round(amp, 2),
         '量比': round(vol_ratio, 2),
-        '成交额': round(amount / 1e8, 4) if amount else 0.0,  # 元→亿
+        '成交额': round(amount / 1e8, 2) if amount else 0.0,  # 元→亿
         '换手率': round(turnover, 2),
         '今日均价': round(avg_price, 2),
-        '内盘': round(inner / 1e4, 4) if inner else 0.0,  # 手→万手
-        '外盘': round(outer / 1e4, 4) if outer else 0.0,
+        '内盘': round(inner / 1e4, 2) if inner else 0.0,  # 手→万手
+        '外盘': round(outer / 1e4, 2) if outer else 0.0,
         '委比': round(weibi, 2),
     }
 
@@ -1011,13 +1011,13 @@ def backfill_volume_fields_from_hist(today, hist):
     close_px = float(last['close']) if float(last.get('close', 0) or 0) > 0 else 0.0
 
     if float(today.get('今日成交量', 0) or 0) <= 0 and vol_raw > 0:
-        today['今日成交量'] = round(vol_raw / 1e6, 4)
+        today['今日成交量'] = round(vol_raw / 1e6, 2)
 
     if float(today.get('成交额', 0) or 0) <= 0:
         if amount_raw > 0:
-            today['成交额'] = round(amount_raw / 1e8, 4)
+            today['成交额'] = round(amount_raw / 1e8, 2)
         elif vol_raw > 0 and close_px > 0:
-            today['成交额'] = round(close_px * vol_raw / 1e8, 4)
+            today['成交额'] = round(close_px * vol_raw / 1e8, 2)
 
     if float(today.get('换手率', 0) or 0) <= 0:
         for col in ('turnover_rate', 'turn'):
@@ -1733,8 +1733,8 @@ if __name__ == "__main__":
                     volume_records.append({
                         '股票代码': code, '股票名称': name, '最新价': row['最新价'],
                         '今日涨跌幅%': today['今日涨跌幅'],
-                        '今日成交量(万手)': round(today_vol_shares / 1e6, 4),
-                        '20日均量(万手)': round(vol_ma20_shares / 1e6, 4),
+                        '今日成交量(万手)': round(today_vol_shares / 1e6, 2),
+                        '20日均量(万手)': round(vol_ma20_shares / 1e6, 2),
                         '放量倍数': volume_ratio,
                         'K 线形态': row['K 线形态'], 'ADX 趋势强度': row['ADX 趋势强度'],
                         'OBV 趋势': row['OBV 趋势']
