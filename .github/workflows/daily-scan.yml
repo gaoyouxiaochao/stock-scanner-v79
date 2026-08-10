@@ -27,7 +27,14 @@ jobs:
           pip install pandas numpy akshare baostock tqdm openpyxl requests
 
       - name: 运行强势股扫描器
-        run: python stock_scanner_v79.py
+        run: |
+          pwd
+          ls -la
+          ls -la results/ || true
+          python stock_scanner_v79.py
+          echo "===== 扫描后 results ====="
+          ls -la results/ || echo "results 不存在"
+          find results -name '*.xlsx' -type f 2>/dev/null || true
 
       - name: 提交结果并推送微信下载链接
         env:
@@ -36,39 +43,52 @@ jobs:
           set -e
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          mkdir -p results
 
-          # 找到最新生成的 Excel（脚本输出中文名时间戳文件），排除已有的 latest.xlsx
-          FILE=$(ls -t results/*.xlsx 2>/dev/null | grep -v 'latest.xlsx' | head -n 1 || true)
-          if [ -z "$FILE" ] || [ ! -f "$FILE" ]; then
-            echo "没有生成 Excel，跳过推送"
-            exit 0
+          echo "===== 推送前 results ====="
+          ls -la results/ || true
+
+          # 优先 latest.xlsx；否则取任意最新 xlsx 复制为 latest
+          if [ -f results/latest.xlsx ]; then
+            echo "已有 latest.xlsx"
+          else
+            FILE=$(ls -t results/*.xlsx 2>/dev/null | head -n 1 || true)
+            if [ -n "$FILE" ] && [ -f "$FILE" ]; then
+              cp -f "$FILE" results/latest.xlsx
+              echo "复制 $FILE -> results/latest.xlsx"
+            fi
           fi
 
-          # 复制为固定英文文件名 latest.xlsx
-          cp -f "$FILE" results/latest.xlsx
-          echo "原始文件: $FILE -> latest.xlsx"
+          if [ ! -f results/latest.xlsx ]; then
+            echo "❌ 没有生成任何 Excel，跳过推送"
+            echo "请向上翻看「运行强势股扫描器」是否 sys.exit 或 无有效数据"
+            exit 1
+          fi
 
-          # 提交到仓库（只提交 latest.xlsx，不堆积历史文件）
+          ls -la results/latest.xlsx
+
+          # .gitignore 忽略了 results/ 与 *.xlsx，必须 -f
           git add -f results/latest.xlsx
+          git add -f results/*.xlsx 2>/dev/null || true
+
           if ! git diff --staged --quiet; then
             git commit -m "auto stock scan $(date -u '+%Y-%m-%d %H:%M') UTC"
             git push
+            echo "已 push"
           else
-            echo "无文件变更，仍推送下载链接"
+            echo "无变更，仍推送下载链接"
           fi
 
-          # 用 github.com 域名（微信可直接点击，raw.githubusercontent.com 常被拦截）
           DL_URL="https://github.com/${{ github.repository }}/raw/main/results/latest.xlsx"
+          echo "Download: $DL_URL"
 
           if [ -z "${PUSHPLUS_TOKEN}" ]; then
             echo "未配置 PUSHPLUS_TOKEN，跳过微信推送"
             exit 0
           fi
 
-          # 推送微信消息（html 模板，点击即下载）
           SCAN_DATE=$(TZ='Asia/Shanghai' date '+%m月%d日 %H:%M')
-          curl -sS -X POST "http://www.pushplus.plus/send" \
+          RESP=$(curl -sS -X POST "https://www.pushplus.plus/send" \
             -H "Content-Type: application/json" \
-            -d "{\"token\":\"${PUSHPLUS_TOKEN}\",\"title\":\"A股扫描报告 ${SCAN_DATE}\",\"content\":\"<a href=\\\"${DL_URL}\\\">点击下载 Excel 报告</a>\",\"template\":\"html\"}"
-
-          echo "PushPlus 已发送"
+            -d "{\"token\":\"${PUSHPLUS_TOKEN}\",\"title\":\"A股扫描报告 ${SCAN_DATE}\",\"content\":\"${DL_URL}\",\"template\":\"txt\"}")
+          echo "PushPlus 响应: $RESP"
