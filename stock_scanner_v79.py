@@ -486,6 +486,30 @@ def fetch_index_hist(symbol, end_date_str, name=''):
     label = name or symbol
     start = (datetime.now() - timedelta(days=500)).strftime("%Y%m%d")
     end = (end_date_str or datetime.now().strftime("%Y-%m-%d")).replace('-', '')
+
+    # --- HSI 恒生指数独立处理 ---
+    if symbol.upper() == 'HSI':
+        try:
+            df = ak.stock_hk_index_daily_sina(symbol='HSI')
+            df = _normalize_index_df(df)
+            if df is not None and len(df) >= 30:
+                print(f"  ✅ 指数 {label} (HSI) 新浪成功 {len(df)} 条")
+                return df
+        except Exception as e:
+            print(f"  ⚠️ 指数 {label} (HSI) 新浪失败: {type(e).__name__}: {str(e)[:60]}")
+        # 备用：东财
+        try:
+            df = ak.stock_hk_index_daily_em(symbol='HSI')
+            df = _normalize_index_df(df)
+            if df is not None and len(df) >= 30:
+                print(f"  ✅ 指数 {label} (HSI) 东财成功 {len(df)} 条")
+                return df
+        except Exception as e:
+            print(f"  ⚠️ 指数 {label} (HSI) 东财失败: {type(e).__name__}: {str(e)[:60]}")
+        print(f"  ❌ 指数 {label} 全部来源失败")
+        return None
+    # --- end HSI ---
+
     pure = re.sub(r'\D', '', str(symbol)).zfill(6)
 
     # 1) 东财
@@ -1499,16 +1523,21 @@ if __name__ == "__main__":
     market_regime, hs300_last, hs300_ma60 = detect_market_regime(hs300, 60)
     print(f"🌡 大盘环境（沪深300 vs MA60）：{market_regime} | 点位≈{hs300_last:.2f} MA60≈{hs300_ma60}")
 
-    print("📡 获取上证/深证指数 → 大盘画像...")
+    print("📡 获取上证/深证/恒生指数 → 大盘画像...")
     sh_hist = fetch_index_hist("000001", END_DATE_STR, "上证指数")
     sz_hist = fetch_index_hist("399001", END_DATE_STR, "深证成指")
+    hsi_hist = fetch_index_hist("HSI", END_DATE_STR, "恒生指数")
     market_profile_rows = [
         build_market_profile_row(sh_hist, "上证指数", "000001"),
         build_market_profile_row(sz_hist, "深证成指", "399001"),
+        build_market_profile_row(hsi_hist, "恒生指数", "HSI"),
     ]
     df_market_profile = pd.DataFrame(market_profile_rows)
     print(f"  上证最新={market_profile_rows[0].get('最新价')} MA5={market_profile_rows[0].get('5日均线')} | "
           f"深证最新={market_profile_rows[1].get('最新价')} MA5={market_profile_rows[1].get('5日均线')}")
+    hsi_price = market_profile_rows[2].get('最新价', 0) if len(market_profile_rows) > 2 else 0
+    if hsi_price and hsi_price > 0:
+        print(f"  恒生最新={hsi_price} MA5={market_profile_rows[2].get('5日均线')}")
 
     input_path = None
     for p in POSSIBLE_INPUTS:
