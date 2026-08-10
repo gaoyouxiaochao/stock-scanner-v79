@@ -45,7 +45,8 @@ POSSIBLE_INPUTS = [
     Path("输入股票代码及名称清单v1.xlsx"),      # ← 默认配置文件名
 ]
 
-OUTPUT_DIR = Path("results")
+_SCRIPT_DIR = Path(__file__).resolve().parent
+OUTPUT_DIR = _SCRIPT_DIR / "results"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 CACHE_DIR = Path("stock_cache_v81")
@@ -1406,6 +1407,9 @@ def get_definition_sheet():
 # ================== 主程序 ==================
 if __name__ == "__main__":
     print(f"🚀 启动 A股强势股扫描器 v81_MinCredible Final...")
+    print(f"📂 工作目录: {Path.cwd()}")
+    print(f"📂 输出目录: {OUTPUT_DIR.resolve()}")
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     END_DATE_STR = get_last_trade_day()
     print(f"📅 扫描基准日期：{END_DATE_STR}")
     print(f"📌 {session_data_note(END_DATE_STR)}")
@@ -1454,8 +1458,8 @@ if __name__ == "__main__":
     hist_dict, fetch_errors = batch_fetch_all_hist(MY_STOCKS, END_DATE_STR)
     errors = list(fetch_errors)
     if not hist_dict:
-        print("❌ 无有效数据")
-        sys.exit(0)
+        print("❌ 无有效数据（全部股票拉取失败）。请检查网络/数据源/代码列表。")
+        sys.exit(1)
     print(f"\n⚡ 开始计算技术指标（{len(hist_dict)} 只）...")
     results = []
     volume_records = []
